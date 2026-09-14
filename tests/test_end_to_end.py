@@ -209,6 +209,20 @@ def test_one_chunk_per_timestep(monkeypatch, base_env):
     assert out.t2m.encoding["chunks"][0] == 1
 
 
+def test_fsspec_uris_work_for_both_input_and_output(monkeypatch, base_env):
+    """Stand in for s3:// and gs:// with backends that need no credentials."""
+    env = base_env | {
+        "INPUT_ZARR": f"file://{base_env['INPUT_ZARR']}",
+        "OUTPUT_ZARR": "memory://fsspec-round-trip.zarr",
+        "N_FORECAST_STEPS": "2",
+    }
+    assert invoke(monkeypatch, env) == 0
+
+    out = xr.open_zarr("memory://fsspec-round-trip.zarr", decode_timedelta=True)
+    assert out.sizes["time"] == 2
+    assert set(out.data_vars) == {"t2m", "tp", "crs"}
+
+
 # --- failure paths -------------------------------------------------------------------
 
 

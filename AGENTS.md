@@ -31,6 +31,7 @@ src/dummy_mlwp/
   varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
   grid.py       cf-xarray coordinate discovery + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
+  storage.py    per-side (SRC_/DST_) fsspec options for the two stores
   inputs.py     open the store, assert it matches the config, pack channels
   model.py      DummyNet, device selection, forward pass, rollout
   outputs.py    assemble the output dataset, write zarr
@@ -89,6 +90,24 @@ Do not revisit these without being asked:
 - Configuration is environment variables only. No CLI, no config file.
 - Level coordinates are declared once in `LEVEL_COORDS` and referenced by name.
   Coordinate names are camelCase (`isobaricInhPa`, `heightAboveGround`).
+- The input and output stores are configured **independently**, via `SRC_*` and `DST_*`
+  variables, so a run can read and write across two different S3 hosts or accounts.
+  Unprefixed spellings fall back to both sides. Anything without a dedicated variable
+  goes through the `*_STORAGE_OPTIONS` JSON escape hatch — resist adding a new env var
+  per fsspec option.
+- **Endpoints belong in `~/.aws/config`**, on the profile, not in the environment. One
+  profile name then carries host, region and credentials together, which is what makes
+  the two-host case tidy. `*_S3_ENDPOINT_URL` stays only as an override for deployments
+  that cannot mount a config file; do not promote it to the primary mechanism.
+- **S3 access is anonymous unless credentials are actually present** (a profile,
+  explicit keys, or ambient IAM role variables). Public buckets are the common case for
+  a test rig, and signing by default turns that into a confusing `NoCredentialsError`.
+  `_has_credentials` in `storage.py` is the single place that decides this.
+- `N_INPUT_TIMESTEPS` selects a window off either end of the input's time axis
+  (positive: first n, negative: last |n|, unset: all). It is applied *after* validation
+  and *before* anything reads the time axis, so the forecast anchors to the last
+  **selected** timestep. Asking for more timesteps than exist is an error, never a
+  silent truncation.
 - Coordinates are auto-detected with cf-xarray, overridable by env var.
 - The output store's zarr format matches the input's unless `ZARR_FORMAT` says otherwise.
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.

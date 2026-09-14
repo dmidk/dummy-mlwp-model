@@ -354,6 +354,7 @@ def write_output(ds: xr.Dataset, config: Config, zarr_format: int, coords: Coord
         consolidated=True,
         zarr_format=zarr_format,
         encoding=encoding,
+        storage_options=config.dst_storage_options or None,
     )
     logger.info(
         f"Wrote {len(ds.data_vars)} variable(s) and {ds.sizes[coords.time]} "

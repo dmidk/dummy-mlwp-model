@@ -6,6 +6,8 @@ pipeline reports all of it rather than one failure per debugging cycle.
 
 from __future__ import annotations
 
+from typing import Any
+
 import fsspec
 import numpy as np
 import xarray as xr
@@ -18,7 +20,7 @@ from .timeaxis import validate_times
 from .varspec import VarSpec, channel_layout
 
 
-def open_input(uri: str) -> xr.Dataset:
+def open_input(uri: str, storage_options: dict[str, Any] | None = None) -> xr.Dataset:
     """Open a zarr store, local or remote.
 
     Parameters
@@ -26,6 +28,9 @@ def open_input(uri: str) -> xr.Dataset:
     uri : str
         Store location. Local paths, ``s3://`` and ``gs://`` all work, the latter two
         through fsspec.
+    storage_options : dict, optional
+        fsspec options for this store — credentials, profile, endpoint. ``None`` or an
+        empty dict leaves fsspec to pick up ambient environment credentials.
 
     Returns
     -------
@@ -44,18 +49,25 @@ def open_input(uri: str) -> xr.Dataset:
     """
     logger.info(f"Opening input store {uri}")
     try:
-        return xr.open_dataset(uri, engine="zarr", decode_timedelta=True)
+        return xr.open_dataset(
+            uri,
+            engine="zarr",
+            decode_timedelta=True,
+            storage_options=storage_options or None,
+        )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
 
 
-def detect_zarr_format(uri: str) -> int | None:
+def detect_zarr_format(uri: str, storage_options: dict[str, Any] | None = None) -> int | None:
     """Detect whether a store is zarr format 2 or 3, so the output can match it.
 
     Parameters
     ----------
     uri : str
         Store location.
+    storage_options : dict, optional
+        fsspec options for this store.
 
     Returns
     -------
@@ -65,7 +77,7 @@ def detect_zarr_format(uri: str) -> int | None:
         best-effort by design: a failure here should not fail the run.
     """
     try:
-        fs, path = fsspec.core.url_to_fs(uri)
+        fs, path = fsspec.core.url_to_fs(uri, **(storage_options or {}))
         if fs.exists(f"{path.rstrip('/')}/zarr.json"):
             return 3
         if fs.exists(f"{path.rstrip('/')}/.zgroup"):
@@ -111,6 +123,55 @@ def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
         f"{config.n_input_channels} channel(s), {ds.sizes[coords.time]} timestep(s), "
         f"grid {ds.sizes[coords.y]}x{ds.sizes[coords.x]}"
     )
+
+
+def select_input_timesteps(ds: xr.Dataset, coords: CoordNames, n: int | None) -> xr.Dataset:
+    """Narrow the input to the timesteps the model should actually see.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened, validated input store.
+    coords : CoordNames
+        Resolved coordinate names.
+    n : int or None
+        ``None`` for every timestep, a positive ``n`` for the first ``n``, a negative
+        ``n`` for the last ``|n|``.
+
+    Returns
+    -------
+    xarray.Dataset
+        The input, sliced along time. Returned unchanged when ``n`` is ``None``.
+
+    Raises
+    ------
+    InputError
+        If the store has fewer timesteps than were asked for. Silently taking what is
+        available would change the forecast's meaning without saying so.
+
+    Notes
+    -----
+    Slicing a contiguous run off either end of an evenly spaced axis leaves it evenly
+    spaced, so the time-axis validation done before this still holds afterwards.
+    """
+    if n is None:
+        return ds
+
+    available = ds.sizes[coords.time]
+    if abs(n) > available:
+        raise InputError(
+            f"N_INPUT_TIMESTEPS={n} asks for {abs(n)} timestep(s) but the input has "
+            f"only {available}"
+        )
+
+    selection = slice(0, n) if n > 0 else slice(available + n, available)
+    selected = ds.isel({coords.time: selection})
+    times = selected[coords.time].values
+    logger.info(
+        f"Using {abs(n)} of {available} input timestep(s) "
+        f"({'first' if n > 0 else 'last'}): {times[0]} to {times[-1]}"
+    )
+    return selected
 
 
 def _referenced_level_coords(config: Config) -> set[str]:

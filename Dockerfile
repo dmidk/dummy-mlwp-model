@@ -37,6 +37,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     UV_PYTHON_INSTALL_DIR=/opt/python \
+    # The CUDA wheels are hundreds of MB each; uv's 30s default times out on them.
+    UV_HTTP_TIMEOUT=300 \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update \

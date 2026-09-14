@@ -21,7 +21,9 @@ dependencies = [
 
 [project.optional-dependencies]
 remote = ["s3fs>=2024.6", "gcsfs>=2024.6"]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# s3fs is here as well as in [remote] so the tests can check that the storage options
+# we build are option names s3fs actually accepts.
+dev = ["pytest>=8.0", "ruff>=0.6", "s3fs>=2024.6"]
 
 [project.scripts]
 dummy-mlwp = "dummy_mlwp.__main__:main"

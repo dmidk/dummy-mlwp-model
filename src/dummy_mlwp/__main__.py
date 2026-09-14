@@ -15,7 +15,13 @@ from loguru import logger
 from .config import Config
 from .errors import DummyMLWPError
 from .grid import detect_coords
-from .inputs import detect_zarr_format, open_input, stack_channels, validate_input
+from .inputs import (
+    detect_zarr_format,
+    open_input,
+    select_input_timesteps,
+    stack_channels,
+    validate_input,
+)
 from .model import (
     DummyNet,
     channel_stats,
@@ -70,9 +76,10 @@ def run(config: Config) -> None:
     """
     started = time.perf_counter()
 
-    ds = open_input(config.input_zarr)
+    ds = open_input(config.input_zarr, config.src_storage_options)
     coords = detect_coords(ds, config.time_coord, config.y_coord, config.x_coord)
     validate_input(ds, config, coords)
+    ds = select_input_timesteps(ds, coords, config.n_input_timesteps)
 
     input_fields = stack_channels(ds, config.input_variables, config, coords)
     times, lead_times, reference_time = build_output_times(
@@ -131,7 +138,7 @@ def _resolve_zarr_format(config: Config) -> int:
     """
     if config.zarr_format != "auto":
         return int(config.zarr_format)
-    detected = detect_zarr_format(config.input_zarr)
+    detected = detect_zarr_format(config.input_zarr, config.src_storage_options)
     if detected is None:
         logger.warning("Could not detect the input's zarr format; writing format 3")
         return 3

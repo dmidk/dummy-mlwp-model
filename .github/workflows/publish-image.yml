@@ -78,27 +78,61 @@ jobs:
           provenance: false
 
       - name: Smoke test the built image
-        # Proves the entrypoint runs and the CPU path works. GPU behaviour needs a
-        # GPU runner, so it is verified manually — see the README.
+        # Proves the entrypoint runs, the CPU path produces a store, and the documented
+        # failure exit codes hold in the container. GPU behaviour needs a GPU runner, so
+        # it is verified manually — see the README.
         if: github.event_name != 'pull_request'
         run: |
+          set -u
           TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           mkdir -p /tmp/data && chmod 777 /tmp/data
-          docker run --rm -v /tmp/data:/data --entrypoint python "$TAG" \
+          DOCKER="docker run --rm -v /tmp/data:/data"
+
+          $DOCKER --entrypoint python "$TAG" \
             -c "import dummy_mlwp; print('version', dummy_mlwp.__version__)"
-          docker run --rm -v /tmp/data:/data \
-            -e INPUT_ZARR=/data/missing.zarr \
-            -e OUTPUT_ZARR=/data/out.zarr \
-            -e INPUT_VARIABLES=t2m \
-            -e OUTPUT_VARIABLES=t2m:K \
-            -e DEVICE=cpu \
-            "$TAG" && exit 1 || test $? -eq 3
-          echo "Missing input correctly exited 3"
-          docker run --rm -v /tmp/data:/data \
-            -e INPUT_ZARR=/data/missing.zarr \
-            -e OUTPUT_ZARR=/data/out.zarr \
-            -e INPUT_VARIABLES=t2m \
-            -e OUTPUT_VARIABLES=t2m:K \
-            -e DEVICE=cuda \
-            "$TAG" && exit 1 || test $? -eq 4
+
+          # Build a tiny input store with the image's own xarray.
+          $DOCKER --entrypoint python "$TAG" -c "
+          import numpy as np, pandas as pd, xarray as xr
+          xr.Dataset(
+              {'t2m': (('time', 'y', 'x'), np.zeros((3, 8, 8), 'float32'))},
+              coords={
+                  'time': pd.date_range('2024-01-01', periods=3, freq='6h'),
+                  'y': np.arange(8.0), 'x': np.arange(8.0),
+              },
+          ).to_zarr('/data/in.zarr', mode='w', consolidated=True, zarr_format=3)
+          "
+
+          expect_exit() {
+            want=$1; shift
+            "$@" && got=0 || got=$?
+            if [ "$got" -ne "$want" ]; then
+              echo "::error::expected exit $want, got $got"
+              exit 1
+            fi
+          }
+
+          expect_exit 0 $DOCKER \
+            -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K,tp:mm \
+            -e N_FORECAST_STEPS=4 -e DEVICE=cpu "$TAG"
+          test -d /tmp/data/out.zarr && echo "CPU run produced a store"
+
+          expect_exit 3 $DOCKER \
+            -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m,notAVariable -e OUTPUT_VARIABLES=t2m:K \
+            -e DEVICE=cpu "$TAG"
+          echo "Missing input variable correctly exited 3"
+
+          expect_exit 2 $DOCKER \
+            -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K \
+            -e OUTPUT_MODE=vibes -e DEVICE=cpu "$TAG"
+          echo "Bad OUTPUT_MODE correctly exited 2"
+
+          # A valid store, so this reaches device selection rather than failing earlier.
+          expect_exit 4 $DOCKER \
+            -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K \
+            -e DEVICE=cuda "$TAG"
           echo "DEVICE=cuda without a GPU correctly exited 4"

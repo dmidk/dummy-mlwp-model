@@ -10,11 +10,13 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from .errors import ConfigError
+from .storage import storage_options
 from .varspec import VarSpec, channel_layout, parse_level_coords, parse_var_specs
 
 OUTPUT_MODES = ("random", "persistence", "constant", "zeros")
@@ -34,6 +36,12 @@ class Config:
         Variables to expect on input and to write on output.
     level_coords : dict of str to numpy.ndarray, optional
         Declared level coordinates, keyed by name.
+    src_storage_options, dst_storage_options : dict, optional
+        fsspec options for the input and output stores, kept separate so the two can
+        live on different object stores or accounts.
+    n_input_timesteps : int or None, optional
+        How many of the input's timesteps to feed the model: ``None`` for all, a
+        positive ``n`` for the first ``n``, a negative ``n`` for the last ``|n|``.
     n_forecast_steps : int, optional
         ``-1`` to predict on the input timesteps, or a positive number of forecast
         steps at the input's time resolution.
@@ -63,6 +71,10 @@ class Config:
     output_variables: list[VarSpec]
     level_coords: dict[str, np.ndarray] = field(default_factory=dict)
 
+    src_storage_options: dict[str, Any] = field(default_factory=dict)
+    dst_storage_options: dict[str, Any] = field(default_factory=dict)
+
+    n_input_timesteps: int | None = None
     n_forecast_steps: int = -1
     forecast_timestep: pd.Timedelta | None = None
 
@@ -108,6 +120,9 @@ class Config:
         return {
             "input_variables": ",".join(str(s) for s in self.input_variables),
             "output_variables": ",".join(str(s) for s in self.output_variables),
+            "n_input_timesteps": "all"
+            if self.n_input_timesteps is None
+            else str(self.n_input_timesteps),
             "n_forecast_steps": str(self.n_forecast_steps),
             "output_mode": self.output_mode,
             "random_seed": str(self.random_seed),
@@ -144,6 +159,13 @@ class Config:
             _require(env, "OUTPUT_VARIABLES"), level_coords, "OUTPUT_VARIABLES"
         )
 
+        n_input_timesteps = _get_optional_int(env, "N_INPUT_TIMESTEPS")
+        if n_input_timesteps == 0:
+            raise ConfigError(
+                "N_INPUT_TIMESTEPS must be a positive number (the first n timesteps) or "
+                "a negative number (the last |n|); leave it unset to use all of them"
+            )
+
         n_forecast_steps = _get_int(env, "N_FORECAST_STEPS", -1)
         if n_forecast_steps == 0 or n_forecast_steps < -1:
             raise ConfigError(
@@ -165,12 +187,18 @@ class Config:
                 f"got {model_layers}"
             )
 
+        input_zarr = _require(env, "INPUT_ZARR")
+        output_zarr = _require(env, "OUTPUT_ZARR")
+
         return cls(
-            input_zarr=_require(env, "INPUT_ZARR"),
-            output_zarr=_require(env, "OUTPUT_ZARR"),
+            input_zarr=input_zarr,
+            output_zarr=output_zarr,
             input_variables=input_variables,
             output_variables=output_variables,
             level_coords=level_coords,
+            src_storage_options=storage_options(env, input_zarr, "SRC"),
+            dst_storage_options=storage_options(env, output_zarr, "DST"),
+            n_input_timesteps=n_input_timesteps,
             n_forecast_steps=n_forecast_steps,
             forecast_timestep=forecast_timestep,
             time_coord=_get_optional(env, "TIME_COORD"),
@@ -257,6 +285,36 @@ def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
     raw = _get_optional(env, key)
     if raw is None:
         return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{key} must be an integer, got {raw!r}") from exc
+
+
+def _get_optional_int(env: Mapping[str, str], key: str) -> int | None:
+    """Read an integer environment variable that has no default.
+
+    Parameters
+    ----------
+    env : mapping of str to str
+        Environment to read.
+    key : str
+        Variable name.
+
+    Returns
+    -------
+    int or None
+        The parsed value, or ``None`` when unset — which the caller is free to read as
+        "no limit" rather than as a number.
+
+    Raises
+    ------
+    ConfigError
+        If the value is not an integer.
+    """
+    raw = _get_optional(env, key)
+    if raw is None:
+        return None
     try:
         return int(raw)
     except ValueError as exc:
