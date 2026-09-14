@@ -19,18 +19,51 @@ from .varspec import VarSpec, channel_layout
 
 
 def open_input(uri: str) -> xr.Dataset:
-    """Open a zarr store, local or remote (``s3://``, ``gs://``, ... via fsspec)."""
+    """Open a zarr store, local or remote.
+
+    Parameters
+    ----------
+    uri : str
+        Store location. Local paths, ``s3://`` and ``gs://`` all work, the latter two
+        through fsspec.
+
+    Returns
+    -------
+    xarray.Dataset
+        The opened store, lazily loaded.
+
+    Raises
+    ------
+    InputError
+        If the store is missing or cannot be read as zarr.
+
+    Notes
+    -----
+    No ``chunks=`` is requested: the whole field stack is loaded into a numpy array
+    anyway, and asking for chunks would drag in a dask dependency for no benefit.
+    """
     logger.info(f"Opening input store {uri}")
     try:
-        # No chunks= here: the whole field stack is loaded into a numpy array anyway,
-        # and asking for chunks would drag in a dask dependency for no benefit.
         return xr.open_dataset(uri, engine="zarr", decode_timedelta=True)
     except (FileNotFoundError, KeyError, ValueError) as exc:
         raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
 
 
 def detect_zarr_format(uri: str) -> int | None:
-    """Detect whether a store is zarr format 2 or 3, so the output can match it."""
+    """Detect whether a store is zarr format 2 or 3, so the output can match it.
+
+    Parameters
+    ----------
+    uri : str
+        Store location.
+
+    Returns
+    -------
+    int or None
+        ``3`` if the store has a ``zarr.json``, ``2`` if it has a ``.zgroup``, and
+        ``None`` when neither is found or the store cannot be inspected. Detection is
+        best-effort by design: a failure here should not fail the run.
+    """
     try:
         fs, path = fsspec.core.url_to_fs(uri)
         if fs.exists(f"{path.rstrip('/')}/zarr.json"):
@@ -43,7 +76,23 @@ def detect_zarr_format(uri: str) -> int | None:
 
 
 def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
-    """Assert the input matches INPUT_VARIABLES, the grid assumption and the time axis."""
+    """Assert the input matches INPUT_VARIABLES, the grid assumption and the time axis.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    config : Config
+        The run configuration.
+    coords : CoordNames
+        Resolved coordinate names.
+
+    Raises
+    ------
+    InputError
+        If anything does not match. Every check runs first, so the message lists all
+        the problems at once rather than stopping at the first.
+    """
     problems: list[str] = []
     problems.extend(validate_grid(ds, coords))
     problems.extend(validate_times(ds[coords.time].values))
@@ -65,10 +114,38 @@ def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
 
 
 def _referenced_level_coords(config: Config) -> set[str]:
+    """List the level coordinates the input variables actually use.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+
+    Returns
+    -------
+    set of str
+        Level coordinate names referenced by INPUT_VARIABLES. Coordinates declared in
+        LEVEL_COORDS but used only on output are not checked against the input.
+    """
     return {s.level_coord for s in config.input_variables if s.level_coord is not None}
 
 
 def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
+    """Check declared level values against the ones in the store.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    config : Config
+        The run configuration.
+
+    Returns
+    -------
+    list of str
+        One message per level coordinate that is missing or whose values differ from
+        the declaration.
+    """
     problems: list[str] = []
     for name in sorted(_referenced_level_coords(config)):
         expected = config.level_coords[name]
@@ -89,6 +166,25 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
 
 
 def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> list[str]:
+    """Check each declared input variable exists with the implied dimensions.
+
+    Dimension *order* is not checked — a store may hold ``(x, time, y)`` and it is
+    transposed later — but the set of dimensions must match exactly.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    config : Config
+        The run configuration.
+    coords : CoordNames
+        Resolved coordinate names.
+
+    Returns
+    -------
+    list of str
+        One message per missing variable or dimension mismatch.
+    """
     problems: list[str] = []
     for spec in config.input_variables:
         if spec.name not in ds.data_vars:
@@ -109,16 +205,46 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
 
 
 def _fmt(values: np.ndarray) -> str:
+    """Format coordinate values compactly for an error message.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Values to render.
+
+    Returns
+    -------
+    str
+        A bracketed, comma-separated list using general numeric formatting.
+    """
     return "[" + ", ".join(f"{v:g}" for v in np.atleast_1d(values)) + "]"
 
 
 def stack_channels(
     ds: xr.Dataset, specs: list[VarSpec], config: Config, coords: CoordNames
 ) -> np.ndarray:
-    """Pack the declared variables into a ``(time, channel, y, x)`` float32 array.
+    """Pack the declared variables into a single dense array for the network.
 
-    Channel order follows :func:`varspec.channel_layout`, which is also what the output
-    side uses to unpack — that shared ordering is what keeps the two halves in step.
+    Channel order follows :func:`~dummy_mlwp.varspec.channel_layout`, which is also
+    what the output side uses to unpack — that shared ordering is what keeps the two
+    halves in step.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened, validated input store.
+    specs : list of VarSpec
+        Variables to pack, in declaration order.
+    config : Config
+        The run configuration, for the level declarations.
+    coords : CoordNames
+        Resolved coordinate names.
+
+    Returns
+    -------
+    numpy.ndarray
+        A ``(time, channel, y, x)`` float32 array. Non-finite values are replaced with
+        zero, with a warning, so they cannot poison the forward pass.
     """
     layout = channel_layout(specs, config.level_coords)
     n_time = ds.sizes[coords.time]
@@ -140,10 +266,23 @@ def stack_channels(
 
 
 def find_grid_mapping_vars(ds: xr.Dataset, specs: list[VarSpec]) -> list[str]:
-    """Names of CRS/grid-mapping variables referenced by the input variables.
+    """Find the CRS/grid-mapping variables referenced by the input variables.
 
     Copying these through means the projection survives into the output store, which
     matters for anything downstream that reprojects or plots the result.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    specs : list of VarSpec
+        Variables whose ``grid_mapping`` attributes should be followed.
+
+    Returns
+    -------
+    list of str
+        Names of the referenced grid-mapping variables that exist in the store, in
+        first-seen order and without duplicates.
     """
     names: list[str] = []
     for spec in specs:

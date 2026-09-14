@@ -36,20 +36,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
+    UV_PYTHON_INSTALL_DIR=/opt/python \
     PATH=/opt/venv/bin:$PATH
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        software-properties-common ca-certificates \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.16 /uv /usr/local/bin/uv
 
-RUN uv venv --python python${PYTHON_VERSION} ${VIRTUAL_ENV}
+# uv fetches its own standalone CPython, so the image needs neither the distro's
+# Python nor a third-party PPA to get a current one.
+RUN uv python install ${PYTHON_VERSION} \
+    && uv venv --python ${PYTHON_VERSION} ${VIRTUAL_ENV}
 
 # torch first, as its own layer: it is by far the largest install and it changes
 # far less often than the application source.

@@ -24,7 +24,26 @@ from .varspec import VarSpec
 
 
 def select_device(requested: str) -> torch.device:
-    """Resolve DEVICE to a concrete torch device, failing loudly when 'cuda' is a lie."""
+    """Resolve DEVICE to a concrete torch device.
+
+    Parameters
+    ----------
+    requested : {'auto', 'cuda', 'cpu'}
+        The requested device. ``'auto'`` prefers CUDA and falls back to CPU with a
+        warning; ``'cuda'`` is a hard requirement.
+
+    Returns
+    -------
+    torch.device
+        The device to run on. Its name and capabilities are logged.
+
+    Raises
+    ------
+    DeviceError
+        If ``'cuda'`` was requested but no CUDA device is visible. The message points
+        at the usual causes — a container started without GPU access, or a missing
+        driver — because silently running on CPU would defeat the purpose.
+    """
     available = torch.cuda.is_available()
 
     if requested == "cuda":
@@ -38,7 +57,7 @@ def select_device(requested: str) -> torch.device:
         device = torch.device("cuda")
     elif requested == "cpu":
         device = torch.device("cpu")
-    else:  # auto
+    else:
         device = torch.device("cuda" if available else "cpu")
         if not available:
             logger.warning("DEVICE=auto and no CUDA device is visible; falling back to CPU")
@@ -60,7 +79,20 @@ class DummyNet(nn.Module):
     """A plain convolutional stack mapping input channels to output channels.
 
     Weights are drawn from a seeded CPU generator and then moved to the device, so a
-    given RANDOM_SEED gives the same weights whether the run is on CPU or GPU.
+    given seed gives the same weights whether the run is on CPU or GPU.
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of 2D input fields.
+    out_channels : int
+        Number of 2D output fields.
+    hidden_channels : int
+        Width of the intermediate convolutions.
+    n_layers : int
+        Total number of convolutions, at least 2.
+    seed : int
+        Seed for the weight initialisation.
     """
 
     def __init__(
@@ -81,12 +113,22 @@ class DummyNet(nn.Module):
         self._init_weights(seed)
 
     def _init_weights(self, seed: int) -> None:
+        """Fill the convolutions with reproducible, variance-preserving weights.
+
+        Parameters
+        ----------
+        seed : int
+            Seed for the CPU generator used to draw the weights.
+
+        Notes
+        -----
+        He scaling is used for the GELU layers and Xavier-ish scaling for the linear
+        output layer. This keeps a deep stack from saturating or exploding, so the
+        output stays finite and worth looking at.
+        """
         generator = torch.Generator().manual_seed(seed)
         for i, conv in enumerate(self.convs):
             fan_in = conv.in_channels * conv.kernel_size[0] * conv.kernel_size[1]
-            # Roughly variance-preserving: He scaling for the GELU layers, Xavier-ish
-            # for the linear output layer. Keeps a deep stack from saturating or
-            # exploding, so the output stays finite and worth looking at.
             gain = 2.0 if i < len(self.convs) - 1 else 1.0
             std = math.sqrt(gain / fan_in)
             with torch.no_grad():
@@ -96,17 +138,42 @@ class DummyNet(nn.Module):
                 conv.bias.zero_()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the convolutional stack.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            A ``(batch, in_channels, y, x)`` tensor.
+
+        Returns
+        -------
+        torch.Tensor
+            A ``(batch, out_channels, y, x)`` tensor.
+        """
         for conv in self.convs[:-1]:
             x = self.activation(conv(x))
         return self.convs[-1](x)
 
 
 def channel_stats(fields: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Per-channel mean and standard deviation of a ``(time, channel, y, x)`` array."""
+    """Compute per-channel normalisation statistics.
+
+    Parameters
+    ----------
+    fields : numpy.ndarray
+        A ``(time, channel, y, x)`` array.
+
+    Returns
+    -------
+    mean : numpy.ndarray
+        Per-channel mean, float32.
+    std : numpy.ndarray
+        Per-channel standard deviation, float32. A constant channel has zero spread,
+        so its scale is forced to 1 and normalisation becomes a plain shift rather
+        than a division by zero.
+    """
     mean = fields.mean(axis=(0, 2, 3), dtype="float64").astype("float32")
     std = fields.std(axis=(0, 2, 3), dtype="float64").astype("float32")
-    # A constant channel has zero spread; keep the scale at 1 so normalisation is a
-    # plain shift rather than a division by zero.
     std = np.where(std > 0, std, 1.0).astype("float32")
     return mean, std
 
@@ -122,6 +189,25 @@ def output_stats(
     Output variables that also appear in the input inherit that variable's statistics,
     so a predicted ``t2m`` lands near 273 K rather than near 0. Genuinely new output
     variables fall back to the average input scale.
+
+    Parameters
+    ----------
+    in_layout, out_layout : list of tuple
+        Channel layouts from :func:`~dummy_mlwp.varspec.channel_layout`.
+    in_mean, in_std : numpy.ndarray
+        Per-input-channel statistics from :func:`channel_stats`.
+
+    Returns
+    -------
+    mean : numpy.ndarray
+        Per-output-channel mean to shift by, float32.
+    std : numpy.ndarray
+        Per-output-channel scale to multiply by, float32.
+
+    Notes
+    -----
+    Matching is tried on ``(name, level)`` first, then on name alone, then falls back
+    to the mean over all input channels.
     """
     by_channel = {(spec.name, level): i for i, (spec, level) in enumerate(in_layout)}
     by_name: dict[str, list[int]] = {}
@@ -146,10 +232,19 @@ def feedback_index(
     in_layout: list[tuple[VarSpec, int | None]],
     out_layout: list[tuple[VarSpec, int | None]],
 ) -> np.ndarray:
-    """For each input channel, the output channel that feeds it on the next step.
+    """Map each input channel to the output channel that feeds it on the next step.
 
-    ``-1`` means the network predicts nothing for that input channel, so the previous
-    value is carried forward during the rollout.
+    Parameters
+    ----------
+    in_layout, out_layout : list of tuple
+        Channel layouts from :func:`~dummy_mlwp.varspec.channel_layout`.
+
+    Returns
+    -------
+    numpy.ndarray
+        One int64 entry per input channel: the index of the matching output channel,
+        or ``-1`` when the network predicts nothing for it. A ``-1`` channel keeps its
+        previous value during the rollout, which is what a static field should do.
     """
     by_channel = {(spec.name, level): i for i, (spec, level) in enumerate(out_layout)}
     return np.array(
@@ -169,11 +264,42 @@ def predict(
     out_std: np.ndarray,
     feedback: np.ndarray,
 ) -> np.ndarray:
-    """Run the network, returning a ``(time, channel, y, x)`` float32 array.
+    """Run the network on the given device.
 
-    ``n_forecast_steps == -1`` runs one batched pass over every input timestep.
-    A positive count rolls the network forward autoregressively, one forward pass per
-    step, so wall-clock time scales with the forecast length the way a real model does.
+    Parameters
+    ----------
+    fields : numpy.ndarray
+        A ``(time, channel, y, x)`` float32 array of input fields.
+    net : DummyNet
+        The network to run. It is moved to ``device`` and put in eval mode.
+    device : torch.device
+        Where to run.
+    n_forecast_steps : int
+        ``-1`` for one batched pass over every input timestep, or a positive number of
+        autoregressive rollout steps.
+    in_mean, in_std : numpy.ndarray
+        Per-input-channel normalisation statistics.
+    out_mean, out_std : numpy.ndarray
+        Per-output-channel denormalisation statistics.
+    feedback : numpy.ndarray
+        Input-to-output channel mapping from :func:`feedback_index`, used by the
+        rollout.
+
+    Returns
+    -------
+    numpy.ndarray
+        A ``(time, channel, y, x)`` float32 array of predictions.
+
+    Raises
+    ------
+    DeviceError
+        If the run was meant to be on a GPU but allocated no GPU memory.
+
+    Notes
+    -----
+    A positive ``n_forecast_steps`` costs one forward pass per step, so wall-clock time
+    scales with the forecast length the way a real model does — which is the property a
+    scheduler test actually cares about.
     """
     net = net.to(device).eval()
     height, width = fields.shape[-2:]
@@ -216,8 +342,32 @@ def _rollout(
     feedback: np.ndarray,
     device: torch.device,
 ) -> torch.Tensor:
-    """Autoregressive rollout from the last input timestep."""
-    state = x[-1:]  # (1, C_in, H, W)
+    """Roll the network forward autoregressively from the last input timestep.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Normalised ``(time, channel, y, x)`` input.
+    net : DummyNet
+        The network, already on ``device``.
+    n_steps : int
+        Number of forecast steps to produce.
+    feedback : numpy.ndarray
+        Input-to-output channel mapping from :func:`feedback_index`.
+    device : torch.device
+        Where to run.
+
+    Returns
+    -------
+    torch.Tensor
+        A ``(n_steps, out_channels, y, x)`` tensor of normalised predictions.
+
+    Notes
+    -----
+    Predicted channels are fed back where a matching output variable exists; channels
+    with no counterpart carry their previous value forward.
+    """
+    state = x[-1:]
     t_feedback = torch.from_numpy(feedback).to(device)
     has_source = t_feedback >= 0
     source = t_feedback.clamp(min=0)
@@ -226,14 +376,29 @@ def _rollout(
     for _ in range(n_steps):
         prediction = net(state)
         steps.append(prediction)
-        # Feed predicted channels back where a matching output variable exists; carry
-        # the previous value forward for input-only channels (e.g. static fields).
         fed = prediction.index_select(1, source)
         state = torch.where(has_source.view(1, -1, 1, 1), fed, state)
     return torch.cat(steps, dim=0)
 
 
 def _log_work(device: torch.device, elapsed: float, n_steps: int) -> None:
+    """Report what the forward pass actually cost.
+
+    Parameters
+    ----------
+    device : torch.device
+        The device the pass ran on.
+    elapsed : float
+        Wall-clock seconds taken.
+    n_steps : int
+        Number of output timesteps produced.
+
+    Raises
+    ------
+    DeviceError
+        If the device is CUDA but no GPU memory was allocated, which means the work
+        did not actually run there.
+    """
     if device.type == "cuda":
         peak = torch.cuda.max_memory_allocated(device) / 1024**2
         logger.info(

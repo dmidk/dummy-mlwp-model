@@ -141,7 +141,7 @@ def test_persistence_repeats_the_last_input_timestep(monkeypatch, base_env):
 
 
 def test_persistence_falls_back_for_unknown_variables(monkeypatch, base_env):
-    """tp is not in the input, so it cannot persist — it takes the network output."""
+    """Fall back to the network output: tp is not in the input, so it cannot persist."""
     env = base_env | {"OUTPUT_MODE": "persistence", "N_FORECAST_STEPS": "2"}
     assert invoke(monkeypatch, env) == 0
 

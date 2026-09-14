@@ -4,15 +4,22 @@ from __future__ import annotations
 
 
 def _resolve_version() -> str:
-    # Written by hatch-vcs at build time; present in any installed copy.
+    """Find the installed version, however the package was installed.
+
+    Returns
+    -------
+    str
+        The version derived from the git tag by hatch-vcs at build time; the
+        distribution metadata when the generated file is absent; ``'0+unknown'`` when
+        the package is not installed at all.
+    """
     try:
         from ._version import __version__ as v
 
         return v
     except ImportError:
         pass
-    # Installed without the generated file (e.g. an editable install from a shallow
-    # clone): fall back to the distribution metadata.
+
     from importlib.metadata import PackageNotFoundError, version
 
     try:

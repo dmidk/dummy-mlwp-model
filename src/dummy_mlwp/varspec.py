@@ -34,25 +34,66 @@ _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 @dataclass(frozen=True)
 class VarSpec:
-    """One variable, as declared in INPUT_VARIABLES or OUTPUT_VARIABLES."""
+    """One variable, as declared in INPUT_VARIABLES or OUTPUT_VARIABLES.
+
+    Parameters
+    ----------
+    name : str
+        Variable name as it appears in the zarr store.
+    units : str or None, optional
+        Units string, written to the output variable's attributes. ``None`` means no
+        units attribute is written, and no units are asserted on input.
+    level_coord : str or None, optional
+        Name of the level coordinate this variable is defined on, or ``None`` for a
+        purely 2D field.
+    """
 
     name: str
     units: str | None = None
     level_coord: str | None = None
 
     def n_levels(self, level_coords: dict[str, np.ndarray]) -> int:
-        """How many 2D fields this variable occupies (1 when it has no level axis)."""
+        """Count the 2D fields ("channels") this variable occupies.
+
+        Parameters
+        ----------
+        level_coords : dict of str to numpy.ndarray
+            Declared level coordinates, keyed by name.
+
+        Returns
+        -------
+        int
+            The number of levels, or 1 when the variable has no level axis.
+        """
         if self.level_coord is None:
             return 1
         return len(level_coords[self.level_coord])
 
     def dims(self, time: str, y: str, x: str) -> tuple[str, ...]:
-        """Canonical dimension order for this variable."""
+        """Give the canonical dimension order for this variable.
+
+        Parameters
+        ----------
+        time, y, x : str
+            Resolved coordinate names for the time and horizontal axes.
+
+        Returns
+        -------
+        tuple of str
+            ``(time, y, x)``, or ``(time, levelCoord, y, x)`` when levels are declared.
+        """
         if self.level_coord is None:
             return (time, y, x)
         return (time, self.level_coord, y, x)
 
     def __str__(self) -> str:
+        """Render the spec back into its source grammar.
+
+        Returns
+        -------
+        str
+            A string that parses back to an equal :class:`VarSpec`.
+        """
         text = self.name
         if self.units is not None:
             text += f":{self.units}"
@@ -62,6 +103,27 @@ class VarSpec:
 
 
 def _check_name(name: str, what: str, source: str) -> str:
+    """Validate and normalise a single name token.
+
+    Parameters
+    ----------
+    name : str
+        Raw token, possibly surrounded by whitespace.
+    what : str
+        What the token represents, used in the error message.
+    source : str
+        Name of the environment variable being parsed, used in the error message.
+
+    Returns
+    -------
+    str
+        The stripped name.
+
+    Raises
+    ------
+    ConfigError
+        If the name is empty or contains characters that are awkward in a zarr store.
+    """
     name = name.strip()
     if not name:
         raise ConfigError(f"{source}: empty {what} in entry")
@@ -75,10 +137,34 @@ def _check_name(name: str, what: str, source: str) -> str:
 
 
 def parse_level_coords(text: str, source: str = "LEVEL_COORDS") -> dict[str, np.ndarray]:
-    """Parse ``name:v1/v2/v3,name2:v1/v2`` into ``{name: values}``.
+    """Parse level coordinate declarations.
 
     Values that are all integral are kept as integers, so a pressure-level coordinate
     comes out as 850/500/250 rather than 850.0/500.0/250.0.
+
+    Parameters
+    ----------
+    text : str
+        Declarations in the form ``name:v1/v2/v3,name2:v1/v2``. An empty string
+        declares no level coordinates.
+    source : str, optional
+        Environment variable name used in error messages.
+
+    Returns
+    -------
+    dict of str to numpy.ndarray
+        Level values keyed by coordinate name, in declaration order.
+
+    Raises
+    ------
+    ConfigError
+        If an entry has no ``':'``, declares no values, repeats a coordinate name,
+        repeats a value, or contains a non-numeric value.
+
+    Examples
+    --------
+    >>> parse_level_coords("isobaricInhPa:850/500")["isobaricInhPa"].tolist()
+    [850, 500]
     """
     coords: dict[str, np.ndarray] = {}
     for entry in _split_entries(text):
@@ -100,6 +186,27 @@ def parse_level_coords(text: str, source: str = "LEVEL_COORDS") -> dict[str, np.
 
 
 def _parse_level_values(tokens: list[str], name: str, source: str) -> np.ndarray:
+    """Convert level value tokens into a typed array.
+
+    Parameters
+    ----------
+    tokens : list of str
+        Individual value tokens, already stripped.
+    name : str
+        Coordinate name, used in error messages.
+    source : str
+        Environment variable name, used in error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``int32`` values when every token is integral, otherwise ``float64``.
+
+    Raises
+    ------
+    ConfigError
+        If a token is not numeric, or a value is repeated.
+    """
     try:
         values = [float(t) for t in tokens]
     except ValueError as exc:
@@ -118,7 +225,28 @@ def parse_var_specs(
     level_coords: dict[str, np.ndarray],
     source: str,
 ) -> list[VarSpec]:
-    """Parse a comma-separated list of variable specs, validating level references."""
+    """Parse a comma-separated list of variable specs.
+
+    Parameters
+    ----------
+    text : str
+        Entries in the form ``name[:units][@levelCoordName]``, comma-separated.
+    level_coords : dict of str to numpy.ndarray
+        Declared level coordinates, used to validate ``@`` references.
+    source : str
+        Environment variable name used in error messages.
+
+    Returns
+    -------
+    list of VarSpec
+        One spec per entry, in declaration order.
+
+    Raises
+    ------
+    ConfigError
+        If the list is empty, a name repeats, an entry is malformed, or a ``@``
+        reference names an undeclared level coordinate.
+    """
     specs: list[VarSpec] = []
     seen: set[str] = set()
     for entry in _split_entries(text):
@@ -133,6 +261,28 @@ def parse_var_specs(
 
 
 def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> VarSpec:
+    """Parse a single ``name[:units][@levelCoord]`` entry.
+
+    Parameters
+    ----------
+    entry : str
+        One comma-separated entry, already stripped.
+    level_coords : dict of str to numpy.ndarray
+        Declared level coordinates, used to validate a ``@`` reference.
+    source : str
+        Environment variable name used in error messages.
+
+    Returns
+    -------
+    VarSpec
+        The parsed spec.
+
+    Raises
+    ------
+    ConfigError
+        If the name is invalid, the units part is empty, the entry ends in a bare
+        ``'@'``, or the level coordinate is undeclared.
+    """
     head, _, raw_level = entry.partition("@")
     level_coord: str | None = None
     if raw_level:
@@ -155,6 +305,18 @@ def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> 
 
 
 def _split_entries(text: str) -> list[str]:
+    """Split a comma-separated list, dropping whitespace and empty entries.
+
+    Parameters
+    ----------
+    text : str
+        The raw environment variable value.
+
+    Returns
+    -------
+    list of str
+        Stripped, non-empty entries.
+    """
     return [entry.strip() for entry in text.split(",") if entry.strip()]
 
 
@@ -166,6 +328,26 @@ def channel_layout(
     A variable with three levels contributes three channels, in level order. The same
     function is used for input and output, which is what keeps the tensor packing and
     unpacking consistent.
+
+    Parameters
+    ----------
+    specs : list of VarSpec
+        Variables in declaration order.
+    level_coords : dict of str to numpy.ndarray
+        Declared level coordinates, used to expand 3D variables.
+
+    Returns
+    -------
+    list of tuple
+        One ``(spec, level_index)`` pair per channel. ``level_index`` is ``None`` for
+        variables with no level axis, otherwise the index into that variable's levels.
+
+    Examples
+    --------
+    >>> levels = parse_level_coords("isobaricInhPa:850/500")
+    >>> specs = parse_var_specs("t2m,t@isobaricInhPa", levels, "INPUT_VARIABLES")
+    >>> [(s.name, i) for s, i in channel_layout(specs, levels)]
+    [('t2m', None), ('t', 0), ('t', 1)]
     """
     layout: list[tuple[VarSpec, int | None]] = []
     for spec in specs:

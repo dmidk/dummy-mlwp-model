@@ -32,15 +32,28 @@ _LATLON_STANDARD_NAMES = {"latitude", "longitude"}
 
 @dataclass(frozen=True)
 class CoordNames:
-    """The resolved coordinate names, and which kind of horizontal grid they describe."""
+    """The resolved coordinate names, and which kind of horizontal grid they describe.
+
+    Parameters
+    ----------
+    time : str
+        Name of the time coordinate.
+    y : str
+        Name of the northward coordinate (latitude, or projected y).
+    x : str
+        Name of the eastward coordinate (longitude, or projected x).
+    kind : {'latlon', 'projected'}
+        Which kind of horizontal grid the coordinates describe.
+    """
 
     time: str
     y: str
     x: str
-    kind: str  # "latlon" | "projected"
+    kind: str
 
     @property
     def horizontal(self) -> tuple[str, str]:
+        """Return the horizontal coordinate names as a ``(y, x)`` pair."""
         return (self.y, self.x)
 
 
@@ -53,11 +66,32 @@ def detect_coords(
     """Resolve the time/y/x coordinate names, preferring explicit overrides.
 
     Order of preference: env-var override, then cf-xarray's axes, then cf-xarray's
-    coordinates, then plain-name matching. Ambiguity is an error naming both the
-    candidates and the env var that settles it.
+    coordinates, then plain-name matching.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    time, y, x : str or None, optional
+        Explicit overrides from TIME_COORD / Y_COORD / X_COORD. ``None`` means detect.
+
+    Returns
+    -------
+    CoordNames
+        The resolved names and grid kind.
+
+    Raises
+    ------
+    InputError
+        If an override names a variable the store does not have, if cf-xarray matches
+        more than one candidate for an axis, or if no candidate can be found. Each
+        message names the environment variable that settles the question.
+
+    Notes
+    -----
+    ``guess_coord_axis`` is applied first, which fills in axis and standard_name attrs
+    for common names and lets the cf accessor answer for loosely CF-compliant stores.
     """
-    # guess_coord_axis fills in axis/standard_name attrs for common names, which lets
-    # the cf accessor answer for stores that are only loosely CF-compliant.
     guessed = ds.cf.guess_coord_axis()
     axes = guessed.cf.axes
     coordinates = guessed.cf.coordinates
@@ -78,6 +112,32 @@ def _resolve(
     from_axes: list[str] | None,
     from_coordinates: list[str] | None,
 ) -> str:
+    """Resolve one axis to a single coordinate name.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    axis : {'time', 'y', 'x'}
+        Which axis is being resolved; also determines the env var named in errors.
+    override : str or None
+        Explicit override, which wins when set.
+    from_axes : list of str or None
+        Candidates from ``ds.cf.axes``.
+    from_coordinates : list of str or None
+        Candidates from ``ds.cf.coordinates``.
+
+    Returns
+    -------
+    str
+        The resolved coordinate name.
+
+    Raises
+    ------
+    InputError
+        If the override is absent from the store, the candidates are ambiguous, or
+        nothing matches.
+    """
     env_var = f"{axis.upper()}_COORD"
 
     if override is not None:
@@ -111,6 +171,23 @@ def _resolve(
 
 
 def _grid_kind(ds: xr.Dataset, y_name: str, x_name: str, coordinates: dict[str, list[str]]) -> str:
+    """Decide whether the horizontal grid is geographic or projected.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    y_name, x_name : str
+        Resolved horizontal coordinate names.
+    coordinates : dict of str to list of str
+        cf-xarray's coordinate mapping.
+
+    Returns
+    -------
+    {'latlon', 'projected'}
+        ``'latlon'`` when the coordinates carry latitude/longitude standard names,
+        degree units, or are identified as such by cf-xarray.
+    """
     for name in (y_name, x_name):
         if ds[name].attrs.get("standard_name") in _LATLON_STANDARD_NAMES:
             return "latlon"
@@ -122,7 +199,21 @@ def _grid_kind(ds: xr.Dataset, y_name: str, x_name: str, coordinates: dict[str, 
 
 
 def validate_grid(ds: xr.Dataset, coords: CoordNames) -> list[str]:
-    """Check the horizontal grid is 1D, monotonic and evenly spaced. Returns problems."""
+    """Check the horizontal grid is 1D, monotonic and evenly spaced.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    coords : CoordNames
+        Resolved coordinate names.
+
+    Returns
+    -------
+    list of str
+        One message per problem found; empty when the grid is regular. Problems are
+        returned rather than raised so the caller can report every failure at once.
+    """
     problems: list[str] = []
     for axis, name in (("y", coords.y), ("x", coords.x)):
         problems.extend(_check_axis(ds, name, axis))
@@ -130,6 +221,24 @@ def validate_grid(ds: xr.Dataset, coords: CoordNames) -> list[str]:
 
 
 def _check_axis(ds: xr.Dataset, name: str, axis: str) -> list[str]:
+    """Check one horizontal axis against the regular-grid assumption.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The opened input store.
+    name : str
+        Coordinate name to check.
+    axis : {'y', 'x'}
+        Which axis this is, for the message text.
+
+    Returns
+    -------
+    list of str
+        At most one message, describing the first problem found: not 1D, too short,
+        repeated values, not monotonic, or unevenly spaced. Uneven spacing reports the
+        offending index and the conflicting delta.
+    """
     values = ds[name].values
     if values.ndim != 1:
         return [

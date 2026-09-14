@@ -35,7 +35,14 @@ LOG_FORMAT = (
 
 
 def configure_logging(level: str) -> None:
-    """Point loguru at stderr. An unusable LOG_LEVEL warns and falls back to INFO."""
+    """Point loguru at stderr.
+
+    Parameters
+    ----------
+    level : str
+        A loguru level name. An unrecognised level warns and falls back to ``INFO``,
+        rather than failing a run over a typo in a log setting.
+    """
     logger.remove()
     try:
         logger.add(sys.stderr, level=level, format=LOG_FORMAT, colorize=sys.stderr.isatty())
@@ -45,7 +52,22 @@ def configure_logging(level: str) -> None:
 
 
 def run(config: Config) -> None:
-    """Execute one forecast, start to finish."""
+    """Execute one forecast, start to finish.
+
+    Parameters
+    ----------
+    config : Config
+        The parsed run configuration.
+
+    Raises
+    ------
+    InputError
+        If the input store does not match the configuration.
+    DeviceError
+        If the requested device is unusable.
+    ConfigError
+        If the forecast resolution cannot be determined from the input.
+    """
     started = time.perf_counter()
 
     ds = open_input(config.input_zarr)
@@ -94,6 +116,19 @@ def run(config: Config) -> None:
 
 
 def _resolve_zarr_format(config: Config) -> int:
+    """Decide which zarr format to write.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+
+    Returns
+    -------
+    {2, 3}
+        The explicit ZARR_FORMAT when set, otherwise the input store's own format.
+        Falls back to 3, with a warning, when detection fails.
+    """
     if config.zarr_format != "auto":
         return int(config.zarr_format)
     detected = detect_zarr_format(config.input_zarr)
@@ -105,8 +140,19 @@ def _resolve_zarr_format(config: Config) -> int:
 
 
 def main() -> int:
-    # Parse the config first so a bad LOG_LEVEL or missing variable fails immediately,
-    # before any store is touched.
+    """Run the application from the environment and return a process exit code.
+
+    Returns
+    -------
+    int
+        0 on success; 2 for a configuration error, 3 for an input error, 4 for a
+        device error, and 1 for anything unexpected, whose traceback is logged.
+
+    Notes
+    -----
+    The configuration is parsed before any store is touched, so a bad deployment
+    fails in the first second rather than after a long read.
+    """
     configure_logging(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
     try:
         config = Config.from_env()

@@ -23,7 +23,24 @@ from .errors import ConfigError, InputError
 
 
 def infer_dt(times: np.ndarray) -> pd.Timedelta:
-    """Infer the timestep of an evenly spaced, strictly increasing time axis."""
+    """Infer the timestep of an evenly spaced, strictly increasing time axis.
+
+    Parameters
+    ----------
+    times : numpy.ndarray
+        ``datetime64`` values from the input's time coordinate.
+
+    Returns
+    -------
+    pandas.Timedelta
+        The spacing between successive timesteps.
+
+    Raises
+    ------
+    InputError
+        If there is only one timestep, the axis is not strictly increasing, or the
+        spacing is not constant. The message names the offending timestamps or index.
+    """
     if times.size < 2:
         raise InputError(
             "Cannot infer the input timestep from a single timestep; "
@@ -47,7 +64,24 @@ def infer_dt(times: np.ndarray) -> pd.Timedelta:
 
 
 def validate_times(times: np.ndarray) -> list[str]:
-    """Collect (rather than raise) time-axis problems, for batched input validation."""
+    """Collect, rather than raise, time-axis problems.
+
+    Parameters
+    ----------
+    times : numpy.ndarray
+        ``datetime64`` values from the input's time coordinate.
+
+    Returns
+    -------
+    list of str
+        At most one message describing the problem; empty when the axis is usable. A
+        single timestep is not a problem here — it only matters if a forecast is then
+        requested without FORECAST_TIMESTEP.
+
+    See Also
+    --------
+    infer_dt : The same checks, raising instead of collecting.
+    """
     if times.size < 2:
         return []
     try:
@@ -62,7 +96,36 @@ def build_output_times(
     n_forecast_steps: int,
     forecast_timestep: pd.Timedelta | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.datetime64]:
-    """Return ``(times, lead_times, reference_time)`` for the output store."""
+    """Build the output store's time, lead time and reference time coordinates.
+
+    Parameters
+    ----------
+    input_times : numpy.ndarray
+        ``datetime64`` values from the input's time coordinate.
+    n_forecast_steps : int
+        ``-1`` to reuse the input times, or a positive number of forecast steps.
+    forecast_timestep : pandas.Timedelta or None, optional
+        Explicit forecast resolution. Required when the input has a single timestep;
+        otherwise it overrides the inferred spacing, with a warning.
+
+    Returns
+    -------
+    times : numpy.ndarray
+        ``datetime64[ns]`` values for the output time coordinate.
+    lead_times : numpy.ndarray
+        ``timedelta64`` offsets of each output time from the reference time. Zero or
+        negative in the ``-1`` regime.
+    reference_time : numpy.datetime64
+        The last input time, i.e. the analysis time.
+
+    Raises
+    ------
+    ConfigError
+        If a forecast is requested from a single-timestep input and no
+        FORECAST_TIMESTEP is set.
+    InputError
+        If the input time axis is not strictly increasing and evenly spaced.
+    """
     input_times = input_times.astype("datetime64[ns]")
     reference_time = input_times[-1]
 
@@ -78,6 +141,27 @@ def build_output_times(
 
 
 def _output_dt(input_times: np.ndarray, forecast_timestep: pd.Timedelta | None) -> pd.Timedelta:
+    """Decide the forecast resolution.
+
+    Parameters
+    ----------
+    input_times : numpy.ndarray
+        ``datetime64`` values from the input's time coordinate.
+    forecast_timestep : pandas.Timedelta or None
+        Explicit resolution from FORECAST_TIMESTEP, if set.
+
+    Returns
+    -------
+    pandas.Timedelta
+        The explicit resolution when given, otherwise the input's own spacing.
+
+    Raises
+    ------
+    ConfigError
+        If the input has a single timestep and no explicit resolution was given.
+    InputError
+        If the input time axis is unusable.
+    """
     if input_times.size < 2:
         if forecast_timestep is None:
             raise ConfigError(

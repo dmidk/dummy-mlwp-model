@@ -24,9 +24,27 @@ def apply_output_mode(
 ) -> np.ndarray:
     """Decide what actually lands in the output, given the network's prediction.
 
-    The forward pass has already happened by the time this is called — the mode chooses
-    what to keep, it never skips the compute. That is deliberate: the GPU check must not
-    be switchable off by configuration.
+    The forward pass has already happened by the time this is called — the mode
+    chooses what to keep, it never skips the compute. That is deliberate: the GPU
+    check must not be switchable off by configuration.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration, for ``output_mode`` and ``constant_value``.
+    predicted : numpy.ndarray
+        The network's ``(time, channel, y, x)`` output.
+    input_fields : numpy.ndarray
+        The ``(time, channel, y, x)`` input, needed by persistence mode.
+    in_layout, out_layout : list of tuple
+        Channel layouts from :func:`~dummy_mlwp.varspec.channel_layout`.
+
+    Returns
+    -------
+    numpy.ndarray
+        An array shaped like ``predicted``. In persistence mode, output channels with
+        no matching input variable and level keep the network's output, with a
+        warning naming them.
     """
     if config.output_mode == "random":
         return predicted
@@ -35,7 +53,6 @@ def apply_output_mode(
     if config.output_mode == "constant":
         return np.full_like(predicted, config.constant_value)
 
-    # persistence: repeat the last input timestep of the matching variable/level.
     by_channel = {(spec.name, level): i for i, (spec, level) in enumerate(in_layout)}
     result = predicted.copy()
     missing: list[str] = []
@@ -63,7 +80,38 @@ def build_output_dataset(
     reference_time: np.datetime64,
     device: str,
 ) -> xr.Dataset:
-    """Wrap the predicted channels in a CF-flavoured dataset on the input's grid."""
+    """Wrap the predicted channels in a CF-flavoured dataset on the input's grid.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    coords : CoordNames
+        Resolved coordinate names.
+    input_ds : xarray.Dataset
+        The input store, whose horizontal coordinates and CRS are carried through.
+    fields : numpy.ndarray
+        A ``(time, channel, y, x)`` array of output values.
+    times, lead_times : numpy.ndarray
+        Output time and lead-time coordinate values.
+    reference_time : numpy.datetime64
+        The analysis time.
+    device : str
+        Device name, recorded in the dataset attributes.
+
+    Returns
+    -------
+    xarray.Dataset
+        The output dataset: one variable per OUTPUT_VARIABLES entry, the input's
+        horizontal coordinates verbatim, forecast time coordinates, and attributes
+        recording the configuration that produced the run.
+
+    Raises
+    ------
+    InputError
+        If the number of predicted channels disagrees with OUTPUT_VARIABLES, which
+        would mean the packing and unpacking layouts had drifted apart.
+    """
     layout = channel_layout(config.output_variables, config.level_coords)
     if fields.shape[1] != len(layout):
         raise InputError(
@@ -112,6 +160,18 @@ def build_output_dataset(
 
 
 def _var_attrs(spec: VarSpec) -> dict[str, str]:
+    """Build the attributes for one output variable.
+
+    Parameters
+    ----------
+    spec : VarSpec
+        The output variable's declaration.
+
+    Returns
+    -------
+    dict of str to str
+        A ``long_name``, plus ``units`` when the spec declared them.
+    """
     attrs = {"long_name": f"dummy prediction of {spec.name}"}
     if spec.units is not None:
         attrs["units"] = spec.units
@@ -121,6 +181,25 @@ def _var_attrs(spec: VarSpec) -> dict[str, str]:
 def _coord(
     values: np.ndarray, name: str, input_ds: xr.Dataset, defaults: dict[str, str]
 ) -> xr.DataArray:
+    """Build a coordinate with new values but the input's descriptive attributes.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        The new coordinate values.
+    name : str
+        Coordinate name.
+    input_ds : xarray.Dataset
+        The input store, whose attributes are reused when it has this coordinate.
+    defaults : dict of str to str
+        Attributes to start from, overridden by the input's own.
+
+    Returns
+    -------
+    xarray.DataArray
+        The coordinate. ``units`` and ``calendar`` are dropped, since they describe
+        the input's encoding rather than these values.
+    """
     attrs = dict(defaults)
     if name in input_ds.variables:
         attrs.update(
@@ -132,8 +211,20 @@ def _coord(
 def _copy_coord(da: xr.DataArray) -> xr.DataArray:
     """Reuse an input coordinate verbatim, minus its source-store encoding.
 
-    Dropping the encoding matters: carrying the input's chunking or compressor into the
-    output makes to_zarr complain when they disagree with what we ask for.
+    Parameters
+    ----------
+    da : xarray.DataArray
+        The input coordinate.
+
+    Returns
+    -------
+    xarray.DataArray
+        A deep copy with empty encoding.
+
+    Notes
+    -----
+    Dropping the encoding matters: carrying the input's chunking or compressor into
+    the output makes ``to_zarr`` complain when they disagree with what we ask for.
     """
     copy = da.copy(deep=True)
     copy.encoding = {}
@@ -141,6 +232,23 @@ def _copy_coord(da: xr.DataArray) -> xr.DataArray:
 
 
 def _level_coord(name: str, values: np.ndarray, input_ds: xr.Dataset) -> xr.DataArray:
+    """Build a level coordinate, reusing the input's version when it matches.
+
+    Parameters
+    ----------
+    name : str
+        Level coordinate name.
+    values : numpy.ndarray
+        Declared level values.
+    input_ds : xarray.Dataset
+        The input store.
+
+    Returns
+    -------
+    xarray.DataArray
+        The input's coordinate when present and the same length — keeping its CF
+        attributes — otherwise a fresh coordinate from the declared values.
+    """
     if name in input_ds.variables and input_ds[name].shape == values.shape:
         return _copy_coord(input_ds[name])
     return xr.DataArray(values, dims=(name,), attrs={"long_name": name})
@@ -149,7 +257,26 @@ def _level_coord(name: str, values: np.ndarray, input_ds: xr.Dataset) -> xr.Data
 def _copy_grid_mapping(
     ds: xr.Dataset, input_ds: xr.Dataset, config: Config, var_names: list[str]
 ) -> xr.Dataset:
-    """Carry the CRS variable through, so the output stays georeferenced."""
+    """Carry the CRS variable through, so the output stays georeferenced.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The output dataset being assembled.
+    input_ds : xarray.Dataset
+        The input store.
+    config : Config
+        The run configuration, for the input variable list.
+    var_names : list of str
+        Output variables that should reference the grid mapping.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with the CRS variable copied in and referenced. If the input uses
+        several grid mappings they are all copied but none is attached, with a
+        warning, since picking one would be a guess.
+    """
     mappings = find_grid_mapping_vars(input_ds, config.input_variables)
     if not mappings:
         return ds
@@ -169,6 +296,23 @@ def _copy_grid_mapping(
 
 
 def _dataset_attrs(config: Config, coords: CoordNames, device: str) -> dict[str, str]:
+    """Build the output dataset's global attributes.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration, summarised into the attributes.
+    coords : CoordNames
+        Resolved coordinate names, for the grid kind.
+    device : str
+        Device the run used.
+
+    Returns
+    -------
+    dict of str to str
+        CF-style metadata, a comment stating plainly that the values are synthetic,
+        and the configuration that produced them.
+    """
     from . import __version__
 
     return {
@@ -189,7 +333,19 @@ def _dataset_attrs(config: Config, coords: CoordNames, device: str) -> dict[str,
 
 
 def write_output(ds: xr.Dataset, config: Config, zarr_format: int, coords: CoordNames) -> None:
-    """Write the dataset to zarr, one chunk per timestep."""
+    """Write the dataset to zarr, one chunk per timestep.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The assembled output dataset.
+    config : Config
+        The run configuration, for the output URI.
+    zarr_format : {2, 3}
+        Store format to write.
+    coords : CoordNames
+        Resolved coordinate names.
+    """
     encoding = _chunk_encoding(ds, coords)
     logger.info(f"Writing {config.output_zarr} (zarr format {zarr_format})")
     ds.to_zarr(
@@ -206,7 +362,21 @@ def write_output(ds: xr.Dataset, config: Config, zarr_format: int, coords: Coord
 
 
 def _chunk_encoding(ds: xr.Dataset, coords: CoordNames) -> dict[str, dict]:
-    """One timestep per chunk, full spatial extent — the shape readers usually want."""
+    """Choose output chunking: one timestep per chunk, full spatial extent.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The assembled output dataset.
+    coords : CoordNames
+        Resolved coordinate names.
+
+    Returns
+    -------
+    dict of str to dict
+        A ``to_zarr`` encoding mapping, covering every time-varying data variable.
+        This is the shape readers usually want: a whole field per read.
+    """
     encoding: dict[str, dict] = {}
     for name, da in ds.data_vars.items():
         if coords.time not in da.dims:

@@ -31,6 +31,30 @@ def build(
     freq: str,
     seed: int,
 ) -> xr.Dataset:
+    """Build a synthetic, CF-compliant input dataset.
+
+    Parameters
+    ----------
+    kind : {'latlon', 'projected'}
+        Whether to build a geographic grid or a projected one. The projected variant
+        also carries a ``crs`` grid-mapping variable.
+    nt : int
+        Number of timesteps.
+    ny, nx : int
+        Grid size.
+    levels : list of float or None
+        Pressure levels for the 3D variable, or ``None`` for surface fields only.
+    freq : str
+        Time resolution, as a pandas frequency string such as ``'6h'``.
+    seed : int
+        Seed for the random fields.
+
+    Returns
+    -------
+    xarray.Dataset
+        Surface fields ``t2m``, ``u10`` and ``v10``, plus ``t`` on pressure levels
+        when ``levels`` is given.
+    """
     rng = np.random.default_rng(seed)
     times = pd.date_range("2024-01-01T00:00", periods=nt, freq=freq)
 
@@ -99,7 +123,25 @@ def build(
 def _smooth_field(
     rng: np.random.Generator, shape: tuple[int, ...], mean: float, spread: float
 ) -> np.ndarray:
-    """Spatially correlated noise — smooth enough to look like a field when plotted."""
+    """Generate spatially correlated noise.
+
+    Parameters
+    ----------
+    rng : numpy.random.Generator
+        Source of randomness.
+    shape : tuple of int
+        Output shape, with the horizontal axes last.
+    mean : float
+        Target mean of the field.
+    spread : float
+        Target standard deviation.
+
+    Returns
+    -------
+    numpy.ndarray
+        A float32 field, smoothed along both horizontal axes so it looks like weather
+        rather than static when plotted.
+    """
     field = rng.standard_normal(shape)
     for axis in (-2, -1):
         for _ in range(3):
@@ -109,6 +151,7 @@ def _smooth_field(
 
 
 def main() -> None:
+    """Parse command-line arguments and write the synthetic store."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", help="path of the zarr store to write")
     parser.add_argument("--kind", choices=("latlon", "projected"), default="latlon")

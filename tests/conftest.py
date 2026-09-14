@@ -40,7 +40,7 @@ def make_input(tmp_path):
 
 @pytest.fixture
 def make_dataset():
-    """An in-memory synthetic dataset, for tests that never touch disk."""
+    """Build an in-memory synthetic dataset, for tests that never touch disk."""
 
     def _make(
         kind: str = "projected",
@@ -57,7 +57,7 @@ def make_dataset():
 
 @pytest.fixture
 def base_env(tmp_path, make_input):
-    """A minimal, valid environment pointing at a freshly written input store."""
+    """Build a minimal, valid environment pointing at a freshly written input store."""
     source = make_input(levels=LEVELS)
     return {
         "INPUT_ZARR": str(source),
