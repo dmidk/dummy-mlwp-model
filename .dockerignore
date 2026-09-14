@@ -1,0 +1,9 @@
+# NOTE: .git is deliberately NOT ignored — hatch-vcs derives the version from the git
+# tag during the build stage. A multi-stage build keeps it out of the runtime image.
+.github
+.venv
+__pycache__
+*.egg-info
+.pytest_cache
+.ruff_cache
+*.zarr

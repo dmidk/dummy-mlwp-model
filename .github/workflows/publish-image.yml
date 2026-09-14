@@ -1,0 +1,104 @@
+name: Publish image
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The image version comes from the git tag via hatch-vcs, and the build
+          # fails outright if no tag is reachable — so the full history is required.
+          fetch-depth: 0
+
+      - name: Free up disk space
+        # The CUDA runtime base plus the torch wheels come to ~6 GB, which is close
+        # to what a hosted runner has free. Drop toolchains this build never uses.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /usr/local/.ghcup
+          df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the container registry
+        # Not on pull requests: forks have no write access, and a PR build is only
+        # there to prove the Dockerfile still builds.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # linux/amd64 only: the CUDA base image has no arm64 variant.
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke test the built image
+        # Proves the entrypoint runs and the CPU path works. GPU behaviour needs a
+        # GPU runner, so it is verified manually — see the README.
+        if: github.event_name != 'pull_request'
+        run: |
+          TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          mkdir -p /tmp/data && chmod 777 /tmp/data
+          docker run --rm -v /tmp/data:/data --entrypoint python "$TAG" \
+            -c "import dummy_mlwp; print('version', dummy_mlwp.__version__)"
+          docker run --rm -v /tmp/data:/data \
+            -e INPUT_ZARR=/data/missing.zarr \
+            -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m \
+            -e OUTPUT_VARIABLES=t2m:K \
+            -e DEVICE=cpu \
+            "$TAG" && exit 1 || test $? -eq 3
+          echo "Missing input correctly exited 3"
+          docker run --rm -v /tmp/data:/data \
+            -e INPUT_ZARR=/data/missing.zarr \
+            -e OUTPUT_ZARR=/data/out.zarr \
+            -e INPUT_VARIABLES=t2m \
+            -e OUTPUT_VARIABLES=t2m:K \
+            -e DEVICE=cuda \
+            "$TAG" && exit 1 || test $? -eq 4
+          echo "DEVICE=cuda without a GPU correctly exited 4"

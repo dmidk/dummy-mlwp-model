@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dummy-mlwp-model"
+dynamic = ["version"]
+description = "A dummy deep-learning weather model: zarr in, zarr out, configured entirely by environment variables."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "xarray>=2025.1.0",
+    "cf-xarray>=0.9",
+    "zarr>=3.0",
+    "fsspec>=2024.6",
+    "torch>=2.4",
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+remote = ["s3fs>=2024.6", "gcsfs>=2024.6"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+dummy-mlwp = "dummy_mlwp.__main__:main"
+
+# Version comes from the git tag (e.g. v0.3.1 -> 0.3.1); untagged commits get a
+# PEP 440 dev version derived from the distance to the last tag.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+version_scheme = "no-guess-dev"
+
+# Baked into the wheel so the version survives into the container, which has no .git.
+[tool.hatch.build.hooks.vcs]
+version-file = "src/dummy_mlwp/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dummy_mlwp"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.zarr/
+.DS_Store
+src/dummy_mlwp/_version.py

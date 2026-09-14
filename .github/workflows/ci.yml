@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # hatch-vcs reads the version from the git tag, so the full history and
+          # tags have to be present or the build reports a bogus version.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install
+        # CPU-only torch keeps this job fast and off the CUDA stack; the test suite
+        # runs with DEVICE=cpu, so it covers everything except the GPU path itself.
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
+          uv pip install -e ".[dev]"
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Smoke test the CLI end to end
+        run: |
+          uv run python scripts/make_test_input.py /tmp/in.zarr \
+            --kind projected --levels 850 500 250
+          INPUT_ZARR=/tmp/in.zarr \
+          OUTPUT_ZARR=/tmp/out.zarr \
+          LEVEL_COORDS=isobaricInhPa:850/500/250 \
+          INPUT_VARIABLES=t2m,u10,v10,t:K@isobaricInhPa \
+          OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa \
+          N_FORECAST_STEPS=8 \
+          DEVICE=cpu \
+          uv run python -m dummy_mlwp
+          uv run python -c "import xarray as xr; print(xr.open_zarr('/tmp/out.zarr'))"
