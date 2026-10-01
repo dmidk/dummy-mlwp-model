@@ -1,9 +1,10 @@
 name: CI
 
+# Push only on main: a branch with an open PR is covered by the pull_request run, and
+# pushing on every branch as well ran each commit twice. Branches without a PR get no CI.
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["**"]
+    branches: [main]
   pull_request:
 
 concurrency:
