@@ -15,6 +15,7 @@ from loguru import logger
 
 from . import __version__
 from .config import Config
+from .envvars import warn_unknown_env_vars
 from .errors import DummyMLWPError
 from .grid import detect_coords
 from .inputs import (
@@ -286,6 +287,7 @@ def main() -> int:
     """
     configure_logging(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
     logger.info(f"Starting dummy-mlwp-model {__version__}")
+    warn_unknown_env_vars()
     try:
         config = Config.from_env()
     except DummyMLWPError as exc:
