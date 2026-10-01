@@ -134,6 +134,30 @@ Configuration parsing and input validation both collect *every* problem before f
 so one run of a misconfigured pipeline reports all of them rather than one per debugging
 cycle.
 
+## Logs
+
+Logs go to stderr at `LOG_LEVEL`. With no command line and no config file, the log is
+the only record of what a run actually used, so startup records two things at INFO:
+
+- **the version**, as the very first line — before the configuration is parsed, so even
+  a run that exits 2 says which version failed;
+- **the effective configuration**, as soon as it parses: every setting, defaults
+  included, one line each, labelled with the environment variable that controls it.
+
+```
+INFO | __main__ - Starting dummy-mlwp-model 0.3.1
+INFO | __main__ - Effective configuration (defaults included):
+INFO | __main__ -   INPUT_ZARR            = s3://analysis/hres.zarr
+INFO | __main__ -   INPUT_VARIABLES       = t2m,u10,v10,t:K@isobaricInhPa
+INFO | __main__ -   LEVEL_COORDS          = isobaricInhPa:850/500/250
+INFO | __main__ -   N_INPUT_TIMESTEPS     = unset (all)
+INFO | __main__ -   N_FORECAST_STEPS      = 8
+...
+```
+
+The storage options are not repeated there; they are logged just before it, with
+credentials masked (see [Remote stores](#remote-stores)).
+
 ## Running it
 
 ### Locally
