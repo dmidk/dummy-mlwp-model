@@ -45,6 +45,26 @@ _AMBIENT_CREDENTIAL_VARS = (
 #: fsspec option names that carry a credential.
 _CREDENTIAL_OPTIONS = ("profile", "key", "secret", "token")
 
+#: Substrings that mark an option name as secret when logging, matched case-insensitively
+#: at any nesting depth. Deliberately broad: masking a harmless value costs a little
+#: readability, logging a secret cannot be undone. Names that identify rather than
+#: authenticate (``profile``, ``region_name``, ``endpoint_url``, ``project``,
+#: ``client_email``) match none of these and stay visible.
+_SECRET_NAME_PARTS = (
+    "key",  # key, aws_access_key_id, private_key, account_key, SSECustomerKey
+    "secret",  # secret, aws_secret_access_key, client_secret
+    "token",  # token, aws_session_token, refresh_token, sas_token
+    "password",
+    "passwd",
+    "passphrase",
+    "credential",  # credential, credentials
+    "auth",  # auth, Authorization, proxy_auth
+    "connection_string",  # adlfs; embeds AccountKey=...
+)
+
+#: What a masked value is replaced with in the log.
+_MASK = "***"
+
 
 def storage_options(env: Mapping[str, str], uri: str, side: str) -> dict[str, Any]:
     """Build the fsspec storage options for one side of the run.
@@ -293,9 +313,84 @@ def _redact(options: Mapping[str, Any]) -> dict[str, Any]:
     Returns
     -------
     dict
-        A copy with secret-looking values replaced by ``'***'``. Profile and endpoint
-        names are kept, since seeing which account and host a run used is the whole
-        point of logging this.
+        A copy in which every value under a secret-looking name (see
+        ``_SECRET_NAME_PARTS``) is replaced by ``'***'``, at any depth: nested mappings
+        such as ``client_kwargs`` or ``config_kwargs`` and lists or tuples are walked,
+        and the password in a URL such as ``https://user:pass@host`` is masked as well.
+        Profile names, regions and endpoint hosts are kept, since seeing which account
+        and host a run used is the whole point of logging this. ``options`` itself, and
+        anything nested in it, is left unmodified.
     """
-    secret = ("key", "secret", "token", "password")
-    return {k: ("***" if any(s in k.lower() for s in secret) else v) for k, v in options.items()}
+    return {
+        name: _MASK if _is_secret_name(name) else _redact_value(value)
+        for name, value in options.items()
+    }
+
+
+def _redact_value(value: Any) -> Any:
+    """Redact one value whose own name is not secret, recursing into containers.
+
+    Parameters
+    ----------
+    value : object
+        A storage option value, or an item nested inside one.
+
+    Returns
+    -------
+    object
+        A redacted copy of a mapping, list or tuple; a string with any URL password
+        masked; anything else unchanged.
+    """
+    if isinstance(value, Mapping):
+        return _redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(item) for item in value)
+    if isinstance(value, str):
+        return _redact_url(value)
+    return value
+
+
+def _is_secret_name(name: Any) -> bool:
+    """Report whether an option name looks like it carries a credential.
+
+    Parameters
+    ----------
+    name : object
+        A mapping key, normally a string.
+
+    Returns
+    -------
+    bool
+        True when the lower-cased name contains any of ``_SECRET_NAME_PARTS``.
+    """
+    lowered = str(name).lower()
+    return any(part in lowered for part in _SECRET_NAME_PARTS)
+
+
+def _redact_url(value: str) -> str:
+    """Mask the password in a URL's userinfo, keeping the user name and host.
+
+    Parameters
+    ----------
+    value : str
+        Any string; only one that parses as a URL with a password is changed.
+
+    Returns
+    -------
+    str
+        ``scheme://user:***@host/...`` for a URL carrying a password, otherwise
+        ``value`` unchanged.
+    """
+    if "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if parts.password is None:
+        return value
+    userinfo, _, host = parts.netloc.rpartition("@")
+    user = userinfo.partition(":")[0]
+    return value.replace(parts.netloc, f"{user}:{_MASK}@{host}", 1)
