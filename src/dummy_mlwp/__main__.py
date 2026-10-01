@@ -13,6 +13,7 @@ import time
 from loguru import logger
 
 from .config import Config
+from .envvars import warn_unknown_env_vars
 from .errors import DummyMLWPError
 from .grid import detect_coords
 from .inputs import (
@@ -161,6 +162,7 @@ def main() -> int:
     fails in the first second rather than after a long read.
     """
     configure_logging(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
+    warn_unknown_env_vars()
     try:
         config = Config.from_env()
     except DummyMLWPError as exc:

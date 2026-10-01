@@ -223,6 +223,21 @@ def test_fsspec_uris_work_for_both_input_and_output(monkeypatch, base_env):
     assert set(out.data_vars) == {"t2m", "tp", "crs"}
 
 
+def test_misspelled_variable_warns_but_the_run_succeeds(monkeypatch, base_env, capsys):
+    """N_FORECAST_STEP (no S) is not read, so the default -1 applies; the log says why."""
+    monkeypatch.delenv("N_FORECAST_STEPS", raising=False)
+    env = base_env | {"N_FORECAST_STEP": "8"}
+    assert invoke(monkeypatch, env) == 0
+
+    stderr = capsys.readouterr().err
+    assert "WARNING" in stderr
+    assert "N_FORECAST_STEP has no effect" in stderr
+    assert "Did you mean N_FORECAST_STEPS?" in stderr
+
+    source = xr.open_zarr(env["INPUT_ZARR"])
+    assert np.array_equal(open_output(env).time.values, source.time.values)
+
+
 # --- failure paths -------------------------------------------------------------------
 
 
@@ -231,6 +246,18 @@ def test_missing_required_variable_exits_2(monkeypatch, base_env):
     del env["OUTPUT_VARIABLES"]
     monkeypatch.delenv("OUTPUT_VARIABLES", raising=False)
     assert invoke(monkeypatch, env) == 2
+
+
+def test_misspelling_is_reported_before_the_config_error_it_causes(monkeypatch, base_env, capsys):
+    """A typo is often the reason a variable is "required but not set"; say so first."""
+    env = dict(base_env)
+    env["INPUT_VARIABLE"] = env.pop("INPUT_VARIABLES")
+    monkeypatch.delenv("INPUT_VARIABLES", raising=False)
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "Did you mean INPUT_VARIABLES?" in stderr
+    assert stderr.index("Did you mean INPUT_VARIABLES?") < stderr.index("| ERROR")
 
 
 def test_bad_output_mode_exits_2(monkeypatch, base_env):

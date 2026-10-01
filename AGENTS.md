@@ -28,6 +28,7 @@ code-quality instincts:
 src/dummy_mlwp/
   __main__.py   entrypoint: run(), exit-code mapping, logging setup
   config.py     env -> Config dataclass; all parsing and validation
+  envvars.py    registry of every env var the code reads; warns on likely misspellings
   varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
   grid.py       cf-xarray coordinate discovery + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
@@ -54,6 +55,11 @@ tests/
 - Prefer the existing helpers over new ones: `channel_layout` is the single source of
   truth for channel ordering, and `scripts/make_test_input.py:build` is the single
   synthetic-data generator (the test fixtures import it).
+- **Every environment variable the code reads is listed in `envvars.REGISTRY`.** Add a
+  new variable there in the same change, or a misspelling of it goes unreported;
+  `tests/test_envvars.py` fails when the registry and the code disagree. An unknown name
+  only ever *warns* — containers carry Kubernetes service links and other variables never
+  meant for us — so do not turn that warning into an error.
 
 ## The two invariants worth stating explicitly
 
