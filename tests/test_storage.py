@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 import json
 
+import fsspec
+import fsspec.implementations.memory
 import pytest
 
 from dummy_mlwp.errors import ConfigError
@@ -338,18 +340,48 @@ def test_storage_options_returns_the_real_secrets():
     assert options["client_kwargs"]["aws_secret_access_key"] == "nested-shh"
 
 
+class _OptionsMemoryFileSystem(fsspec.implementations.memory.MemoryFileSystem):
+    """fsspec's in-memory filesystem under a protocol of its own.
+
+    zarr >= 3.2 handles ``memory://`` itself and rejects storage options for it, so a
+    test that needs options to reach the filesystem cannot use ``memory://``. Under
+    any other scheme zarr hands the URL, options included, to fsspec.
+    """
+
+    protocol = ("optsmem",)
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        """Map ``optsmem://`` onto ``memory://`` before the parent strips it.
+
+        Parameters
+        ----------
+        path : str
+            A path or URL, possibly with the ``optsmem://`` prefix.
+
+        Returns
+        -------
+        str
+            The path as :class:`MemoryFileSystem` stores it.
+        """
+        if isinstance(path, str) and path.startswith("optsmem://"):
+            path = "memory://" + path[len("optsmem://") :]
+        return super()._strip_protocol(path)
+
+
 def test_nested_destination_secret_stays_out_of_the_startup_log(monkeypatch, base_env, capsys):
     """Drive the whole application, and read the log a pipeline would actually see."""
     from dummy_mlwp.__main__ import main
 
+    fsspec.register_implementation("optsmem", _OptionsMemoryFileSystem, clobber=True)
     storage = {
         "client_kwargs": {"region_name": "eu-north-1", "aws_secret_access_key": "nested-shh"},
         "config_kwargs": {"proxies": {"https": "http://proxy-user:proxy-shh@proxy.dmi.dk"}},
         "session_kwargs": [{"private_key": "pem-shh", "client_email": "sa@p.iam"}],
     }
     env = base_env | {
-        # memory:// stands in for s3:// and accepts (and ignores) these options.
-        "OUTPUT_ZARR": "memory://redacted-startup-log.zarr",
+        # Stands in for s3://: an in-memory store that accepts (and ignores) these options.
+        "OUTPUT_ZARR": "optsmem://redacted-startup-log.zarr",
         "DST_STORAGE_OPTIONS": json.dumps(storage),
         "N_FORECAST_STEPS": "1",
     }
