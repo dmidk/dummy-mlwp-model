@@ -66,9 +66,20 @@ declaration order, expanding levels. `inputs.stack_channels` packs with it and
 `outputs.build_output_dataset` unpacks with it. If you change one, change both — a
 silent drift here produces plausible-looking output with variables swapped.
 
-**Validation is collected, not raised eagerly.** `inputs.validate_input` gathers every
-problem and raises once, so a misconfigured pipeline reports all its problems in one
-run. New checks should append to the `problems` list, not raise on the spot.
+**Validation is collected, not raised eagerly.** Both layers gather every problem and
+raise once, formatted with `errors.format_problems`, so a misconfigured pipeline reports
+all its problems in one run:
+
+- `inputs.validate_input` — new checks append to its `problems` list, not raise on the
+  spot.
+- `Config.from_env` — the parse helpers (`_get_int`, `varspec.parse_*`,
+  `storage.storage_options`, ...) still raise `ConfigError`; `from_env` runs each through
+  `_attempt`, which records the message and returns `None` as a placeholder. A new
+  variable goes through `_attempt` too, and a cross-check appends to `problems` directly.
+  A check that depends on a value that failed to parse is skipped (`if x is not None`),
+  so one mistake is reported once: a broken `LEVEL_COORDS` makes `parse_var_specs` skip
+  only its "is this `@` reference declared?" check, rather than flagging every reference.
+  A lone problem is raised as its bare message, without the headline.
 
 ## Testing
 

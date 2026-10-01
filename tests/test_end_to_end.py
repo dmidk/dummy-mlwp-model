@@ -249,6 +249,23 @@ def test_undeclared_level_coordinate_exits_2(monkeypatch, base_env):
     assert invoke(monkeypatch, env) == 2
 
 
+def test_all_config_problems_are_reported_together(monkeypatch, base_env, tmp_path, capsys):
+    """Three bad variables should take one run to diagnose, not three."""
+    env = base_env | {
+        "OUTPUT_MODE": "vibes",
+        "N_FORECAST_STEPS": "0",
+        "SRC_STORAGE_OPTIONS": "not json",
+    }
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "The environment configuration has 3 problems:" in stderr
+    assert "OUTPUT_MODE must be one of" in stderr
+    assert "N_FORECAST_STEPS must be -1" in stderr
+    assert "SRC_STORAGE_OPTIONS must be valid JSON" in stderr
+    assert not (tmp_path / "out.zarr").exists()
+
+
 def test_missing_input_variable_exits_3(monkeypatch, base_env):
     env = base_env | {"INPUT_VARIABLES": "t2m,notAVariable"}
     assert invoke(monkeypatch, env) == 3
