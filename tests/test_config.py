@@ -5,6 +5,8 @@ import pytest
 
 from dummy_mlwp.config import Config
 from dummy_mlwp.errors import ConfigError
+from dummy_mlwp.grid import CoordNames
+from dummy_mlwp.outputs import _dataset_attrs
 
 MINIMAL = {
     "INPUT_ZARR": "/in.zarr",
@@ -123,4 +125,16 @@ def test_provenance_round_trips_the_spec_strings():
     )
     provenance = config.provenance()
     assert provenance["output_variables"] == "z:m2s-2@isobaricInhPa"
-    assert provenance["source"] == "/in.zarr"
+    assert provenance["input_zarr"] == "/in.zarr"
+
+
+def test_provenance_does_not_clobber_the_fixed_dataset_attributes(monkeypatch):
+    """Provenance is spread into the output attrs last, so a shared key silently wins."""
+    config = Config.from_env(MINIMAL)
+    coords = CoordNames(time="time", y="y", x="x", kind="projected")
+    with monkeypatch.context() as m:
+        m.setattr(Config, "provenance", lambda self: {})
+        fixed = _dataset_attrs(config, coords, "cpu")
+
+    assert "source" in fixed
+    assert not set(fixed) & set(config.provenance())
