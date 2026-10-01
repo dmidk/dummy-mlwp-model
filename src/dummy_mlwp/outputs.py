@@ -12,7 +12,7 @@ from .config import Config
 from .errors import InputError
 from .grid import CoordNames
 from .inputs import find_grid_mapping_vars
-from .varspec import VarSpec, channel_layout
+from .varspec import KNOWN_LEVEL_COORDS, VarSpec, channel_layout
 
 
 def apply_output_mode(
@@ -103,8 +103,11 @@ def build_output_dataset(
     -------
     xarray.Dataset
         The output dataset: one variable per OUTPUT_VARIABLES entry, the input's
-        horizontal coordinates verbatim, forecast time coordinates, and attributes
-        recording the configuration that produced the run.
+        horizontal coordinates, forecast time coordinates, and attributes recording
+        the configuration that produced the run. Every coordinate carries the CF
+        attributes (``axis`` included) that let a reader identify it without knowing
+        its name; data variables carry whatever ``standard_name`` and ``units`` were
+        declared, and nothing is invented for those that declared none.
 
     Raises
     ------
@@ -121,14 +124,17 @@ def build_output_dataset(
 
     y_name, x_name = coords.y, coords.x
     out_coords: dict[str, xr.DataArray] = {
-        coords.time: _coord(times, coords.time, input_ds, {"standard_name": "time"}),
-        y_name: _copy_coord(input_ds[y_name]),
-        x_name: _copy_coord(input_ds[x_name]),
+        coords.time: _time_coord(times, coords.time, input_ds),
+        y_name: _copy_coord(input_ds[y_name], axis="Y"),
+        x_name: _copy_coord(input_ds[x_name], axis="X"),
     }
 
+    read_levels = {s.level_coord for s in config.input_variables if s.level_coord is not None}
     used_levels = {s.level_coord for s in config.output_variables if s.level_coord is not None}
     for name in sorted(used_levels):
-        out_coords[name] = _level_coord(name, config.level_coords[name], input_ds)
+        out_coords[name] = _level_coord(
+            name, config.level_coords[name], input_ds if name in read_levels else None
+        )
 
     data_vars: dict[str, xr.DataArray] = {}
     channel = 0
@@ -170,51 +176,53 @@ def _var_attrs(spec: VarSpec) -> dict[str, str]:
     Returns
     -------
     dict of str to str
-        A ``long_name``, plus ``units`` when the spec declared them.
+        A ``long_name``, plus ``standard_name`` and ``units`` when the spec declared
+        them.
     """
     attrs = {"long_name": f"dummy prediction of {spec.name}"}
+    if spec.standard_name is not None:
+        attrs["standard_name"] = spec.standard_name
     if spec.units is not None:
         attrs["units"] = spec.units
     return attrs
 
 
-def _coord(
-    values: np.ndarray, name: str, input_ds: xr.Dataset, defaults: dict[str, str]
-) -> xr.DataArray:
-    """Build a coordinate with new values but the input's descriptive attributes.
+def _time_coord(values: np.ndarray, name: str, input_ds: xr.Dataset) -> xr.DataArray:
+    """Build the output time coordinate: new values, the input's descriptive attributes.
 
     Parameters
     ----------
     values : numpy.ndarray
-        The new coordinate values.
+        The output time values.
     name : str
-        Coordinate name.
+        Coordinate name, shared with the input.
     input_ds : xarray.Dataset
-        The input store, whose attributes are reused when it has this coordinate.
-    defaults : dict of str to str
-        Attributes to start from, overridden by the input's own.
+        The input store, whose time attributes are reused.
 
     Returns
     -------
     xarray.DataArray
-        The coordinate. ``units`` and ``calendar`` are dropped, since they describe
-        the input's encoding rather than these values.
+        The coordinate, with ``standard_name='time'`` and ``axis='T'`` set whatever
+        the input carried, since the input may have been identified by its units alone.
+        ``units`` and ``calendar`` are dropped, since they describe the input's
+        encoding rather than these values; xarray writes fresh ones.
     """
-    attrs = dict(defaults)
-    if name in input_ds.variables:
-        attrs.update(
-            {k: v for k, v in input_ds[name].attrs.items() if k not in ("units", "calendar")}
-        )
+    attrs = {"long_name": "time"}
+    attrs.update({k: v for k, v in input_ds[name].attrs.items() if k not in ("units", "calendar")})
+    attrs.update({"standard_name": "time", "axis": "T"})
     return xr.DataArray(values, dims=(name,), attrs=attrs)
 
 
-def _copy_coord(da: xr.DataArray) -> xr.DataArray:
+def _copy_coord(da: xr.DataArray, axis: str | None = None) -> xr.DataArray:
     """Reuse an input coordinate verbatim, minus its source-store encoding.
 
     Parameters
     ----------
     da : xarray.DataArray
         The input coordinate.
+    axis : str or None, optional
+        CF ``axis`` value to set when the input did not, so the output's coordinates
+        are identifiable by ``axis`` as well as by whatever identified the input's.
 
     Returns
     -------
@@ -228,11 +236,13 @@ def _copy_coord(da: xr.DataArray) -> xr.DataArray:
     """
     copy = da.copy(deep=True)
     copy.encoding = {}
+    if axis is not None:
+        copy.attrs.setdefault("axis", axis)
     return copy
 
 
-def _level_coord(name: str, values: np.ndarray, input_ds: xr.Dataset) -> xr.DataArray:
-    """Build a level coordinate, reusing the input's version when it matches.
+def _level_coord(name: str, values: np.ndarray, input_ds: xr.Dataset | None) -> xr.DataArray:
+    """Build a level coordinate from the declared values and a CF description.
 
     Parameters
     ----------
@@ -240,18 +250,24 @@ def _level_coord(name: str, values: np.ndarray, input_ds: xr.Dataset) -> xr.Data
         Level coordinate name.
     values : numpy.ndarray
         Declared level values.
-    input_ds : xarray.Dataset
-        The input store.
+    input_ds : xarray.Dataset or None
+        The input store when an input variable uses this coordinate — validation has
+        then checked it is CF-vertical and matches ``values`` — otherwise ``None``.
 
     Returns
     -------
     xarray.DataArray
-        The input's coordinate when present and the same length — keeping its CF
-        attributes — otherwise a fresh coordinate from the declared values.
+        The coordinate with the declared values. Attributes come from the input's
+        coordinate when given, otherwise from
+        :data:`~dummy_mlwp.varspec.KNOWN_LEVEL_COORDS`, which configuration parsing has
+        already guaranteed has an entry; ``axis='Z'`` is set either way.
     """
-    if name in input_ds.variables and input_ds[name].shape == values.shape:
-        return _copy_coord(input_ds[name])
-    return xr.DataArray(values, dims=(name,), attrs={"long_name": name})
+    if input_ds is not None:
+        attrs = dict(input_ds[name].attrs)
+    else:
+        attrs = dict(KNOWN_LEVEL_COORDS[name])
+    attrs.setdefault("axis", "Z")
+    return xr.DataArray(values, dims=(name,), attrs=attrs)
 
 
 def _copy_grid_mapping(

@@ -31,6 +31,39 @@ def test_units_may_contain_spaces_and_slashes():
     assert spec.units == "kg/m2"
 
 
+def test_parses_standard_names():
+    levels = parse_level_coords("isobaricInhPa:850/500")
+    specs = parse_var_specs(
+        "t2m=air_temperature:K,t=air_temperature@isobaricInhPa,leewave:1",
+        levels,
+        "OUTPUT_VARIABLES",
+    )
+    assert specs[0] == VarSpec("t2m", units="K", standard_name="air_temperature")
+    assert specs[1] == VarSpec("t", level_coord="isobaricInhPa", standard_name="air_temperature")
+    assert specs[2] == VarSpec("leewave", units="1")
+
+
+@pytest.mark.parametrize(
+    "text, match",
+    [
+        ("t2m=:K", "'=' but no standard name"),
+        ("t2m=Air_Temperature", "not a valid CF standard name"),
+        ("t2m=air temperature", "not a valid CF standard name"),
+    ],
+)
+def test_bad_standard_names_are_rejected(text, match):
+    with pytest.raises(ConfigError, match=match):
+        parse_var_specs(text, {}, "INPUT_VARIABLES")
+
+
+def test_spec_round_trips_through_str():
+    levels = parse_level_coords("isobaricInhPa:850/500")
+    text = "t=air_temperature:K@isobaricInhPa"
+    (spec,) = parse_var_specs(text, levels, "OUTPUT_VARIABLES")
+    assert str(spec) == text
+    assert parse_var_specs(str(spec), levels, "OUTPUT_VARIABLES") == [spec]
+
+
 def test_whitespace_around_entries_is_ignored():
     specs = parse_var_specs(" t2m , u10 ", {}, "INPUT_VARIABLES")
     assert [s.name for s in specs] == ["t2m", "u10"]
