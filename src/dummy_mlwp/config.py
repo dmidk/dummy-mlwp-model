@@ -115,7 +115,9 @@ class Config:
         -------
         dict of str to str
             Key configuration values, recorded so a stored result can be traced back
-            to the run that produced it.
+            to the run that produced it. Keys are the lowercased environment variable
+            names, which keeps them clear of the fixed CF attributes (``source``,
+            ``history``, ...) they are merged alongside.
         """
         return {
             "input_variables": ",".join(str(s) for s in self.input_variables),
@@ -126,7 +128,7 @@ class Config:
             "n_forecast_steps": str(self.n_forecast_steps),
             "output_mode": self.output_mode,
             "random_seed": str(self.random_seed),
-            "source": self.input_zarr,
+            "input_zarr": self.input_zarr,
         }
 
     @classmethod
