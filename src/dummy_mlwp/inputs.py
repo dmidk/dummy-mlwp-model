@@ -15,7 +15,7 @@ from loguru import logger
 
 from .config import Config
 from .errors import InputError, format_problems
-from .grid import CoordNames, validate_grid
+from .grid import CoordNames, is_vertical_coord, validate_grid
 from .storage import storage_error, storage_exceptions
 from .timeaxis import validate_times
 from .varspec import VarSpec, channel_layout
@@ -101,6 +101,10 @@ def detect_zarr_format(uri: str, storage_options: dict[str, Any] | None = None) 
 
 def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
     """Assert the input matches INPUT_VARIABLES, the grid assumption and the time axis.
+
+    This includes the CF metadata: level coordinates must identify themselves as
+    vertical, and any ``standard_name`` or ``units`` declared in INPUT_VARIABLES must
+    match the variable's attributes.
 
     Parameters
     ----------
@@ -216,8 +220,8 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
     Returns
     -------
     list of str
-        One message per level coordinate that is missing or whose values differ from
-        the declaration.
+        One message per level coordinate that is missing, is not identified as
+        vertical by its CF attributes, or whose values differ from the declaration.
     """
     problems: list[str] = []
     for name in sorted(_referenced_level_coords(config)):
@@ -227,6 +231,12 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
                 f"level coordinate {name!r} (from LEVEL_COORDS) is not present in the input"
             )
             continue
+        if not is_vertical_coord(ds, name):
+            problems.append(
+                f"level coordinate {name!r} is not identified as a vertical coordinate by "
+                "its CF attributes; it needs axis='Z', positive='up'/'down', a vertical "
+                "standard_name such as 'air_pressure' or 'height', or pressure units"
+            )
         actual = ds[name].values
         if actual.shape != expected.shape or not np.allclose(
             actual.astype("float64"), expected.astype("float64")
@@ -239,14 +249,13 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
 
 
 def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> list[str]:
-    """Check each declared input variable exists with the implied dimensions and units.
+    """Check each declared input variable exists with the implied dimensions and attributes.
 
     Dimension *order* is not checked — a store may hold ``(x, time, y)`` and it is
-    transposed later — but the set of dimensions must match exactly.
-
-    Declared units are compared with the variable's ``units`` attribute as plain
-    strings: no unit parsing or normalisation, so ``m s-1`` does not match ``m/s``. A
-    variable declared without units has no units check.
+    transposed later — but the set of dimensions must match exactly. A declared
+    ``standard_name`` or ``units`` must match the variable's attribute exactly; units
+    are compared as strings, so ``'m s-1'`` and ``'m/s'`` are different on purpose. An
+    attribute that is not declared is not checked.
 
     Parameters
     ----------
@@ -260,8 +269,9 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
     Returns
     -------
     list of str
-        One message per missing variable, dimension mismatch or units mismatch. A
-        variable with both wrong dimensions and wrong units gets one of each.
+        One message per missing variable, dimension mismatch, or CF attribute that is
+        missing or differs from the declaration. A variable with both wrong dimensions
+        and a wrong attribute gets one message for each.
     """
     problems: list[str] = []
     for spec in config.input_variables:
@@ -279,22 +289,47 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
                 f"variable {spec.name!r} has dimensions {tuple(map(str, ds[spec.name].dims))} "
                 f"but {spec} implies {spec.dims(coords.time, coords.y, coords.x)}"
             )
-
-        if spec.units is not None:
-            actual_units = ds[spec.name].attrs.get("units")
-            if actual_units is None:
-                problems.append(
-                    f"variable {spec.name!r} has no 'units' attribute but INPUT_VARIABLES "
-                    f"declares units {spec.units!r}"
-                )
-            # isinstance first: a non-string attribute never matches, and comparing an
-            # array-valued attribute with == would not give a single truth value.
-            elif not (isinstance(actual_units, str) and actual_units == spec.units):
-                problems.append(
-                    f"variable {spec.name!r} has units {actual_units!r} but INPUT_VARIABLES "
-                    f"declares units {spec.units!r} (compared as exact strings, no conversion)"
-                )
+        problems.extend(_validate_attr(ds[spec.name], spec, "standard_name", spec.standard_name))
+        problems.extend(_validate_attr(ds[spec.name], spec, "units", spec.units))
     return problems
+
+
+def _validate_attr(da: xr.DataArray, spec: VarSpec, key: str, expected: str | None) -> list[str]:
+    """Check one declared CF attribute of an input variable.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        The input variable.
+    spec : VarSpec
+        Its declaration, for the message.
+    key : {'standard_name', 'units'}
+        Attribute to check.
+    expected : str or None
+        Declared value; ``None`` means nothing was declared, so nothing is checked.
+
+    Returns
+    -------
+    list of str
+        At most one message: the attribute is missing, or differs from ``expected``. An
+        attribute that is not a string never matches.
+    """
+    if expected is None:
+        return []
+    actual = da.attrs.get(key)
+    if actual is None:
+        return [
+            f"variable {spec.name!r} has no {key!r} attribute but INPUT_VARIABLES declares "
+            f"{key} {expected!r}"
+        ]
+    # isinstance first: a non-string attribute never matches, and comparing an
+    # array-valued attribute with == would not give a single truth value.
+    if not (isinstance(actual, str) and actual == expected):
+        return [
+            f"variable {spec.name!r} has {key} {actual!r} but INPUT_VARIABLES declares "
+            f"{key} {expected!r} (compared as exact strings, no conversion)"
+        ]
+    return []
 
 
 def _fmt(values: np.ndarray) -> str:

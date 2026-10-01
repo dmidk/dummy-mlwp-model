@@ -89,6 +89,39 @@ def test_latlon_input(monkeypatch, tmp_path, make_input):
     assert out.attrs["grid_type"] == "latlon"
 
 
+def test_output_coordinates_are_identifiable_from_cf_attributes(monkeypatch, base_env):
+    """A reader that knows nothing of our names must still find every axis."""
+    from dummy_mlwp.grid import detect_coords, is_vertical_coord
+
+    env = base_env | {
+        "LEVEL_COORDS": "isobaricInhPa:850/500/250,heightAboveGround:10/100",
+        "INPUT_VARIABLES": "t2m=air_temperature:K,t=air_temperature:K@isobaricInhPa",
+        "OUTPUT_VARIABLES": (
+            "t2m=air_temperature:K,z@isobaricInhPa,u=eastward_wind:m s-1@heightAboveGround,leewave"
+        ),
+        "N_FORECAST_STEPS": "2",
+    }
+    assert invoke(monkeypatch, env) == 0
+    out = open_output(env)
+
+    coords = detect_coords(out)
+    assert (coords.time, coords.y, coords.x) == ("time", "y", "x")
+    assert out.time.attrs["axis"] == "T"
+    assert (out.y.attrs["axis"], out.x.attrs["axis"]) == ("Y", "X")
+    for name in ("isobaricInhPa", "heightAboveGround"):
+        assert is_vertical_coord(out, name)
+        assert out[name].attrs["axis"] == "Z"
+    assert out.heightAboveGround.attrs["standard_name"] == "height"
+    assert out.isobaricInhPa.attrs["units"] == "hPa"
+
+    assert out.t2m.attrs["standard_name"] == "air_temperature"
+    assert out.u.attrs["standard_name"] == "eastward_wind"
+    assert "standard_name" not in out.z.attrs
+    assert "standard_name" not in out.leewave.attrs
+    assert out.forecastReferenceTime.attrs["standard_name"] == "forecast_reference_time"
+    assert out.leadTime.attrs["standard_name"] == "forecast_period"
+
+
 def test_projected_run_keeps_the_crs(monkeypatch, base_env):
     assert invoke(monkeypatch, base_env) == 0
     out = open_output(base_env)
@@ -332,6 +365,61 @@ def test_irregular_grid_exits_3(monkeypatch, tmp_path, make_input):
         "DEVICE": "cpu",
     }
     assert invoke(monkeypatch, env) == 3
+
+
+def _rewrite(make_input, tmp_path, edit, levels=None):
+    """Write a copy of a synthetic input store with ``edit`` applied to it."""
+    ds = xr.open_zarr(make_input(levels=levels)).load()
+    edit(ds)
+    path = tmp_path / "edited.zarr"
+    ds.to_zarr(path, mode="w", consolidated=True, zarr_format=3)
+    return path
+
+
+def test_coordinates_without_cf_attributes_exit_3(monkeypatch, base_env, tmp_path, make_input):
+    def strip(ds):
+        for name in ("y", "x"):
+            ds[name].attrs.clear()
+
+    env = base_env | {"INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip))}
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_override_does_not_excuse_missing_cf_attributes(
+    monkeypatch, base_env, tmp_path, make_input
+):
+    def strip(ds):
+        ds["x"].attrs.clear()
+
+    env = base_env | {"INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip)), "X_COORD": "x"}
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_non_vertical_level_coordinate_exits_3(monkeypatch, base_env, tmp_path, make_input):
+    def strip(ds):
+        ds["isobaricInhPa"].attrs = {"long_name": "pressure"}
+
+    env = base_env | {
+        "INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip, levels=[850.0, 500.0, 250.0])),
+        "LEVEL_COORDS": LEVELS,
+        "INPUT_VARIABLES": "t@isobaricInhPa",
+    }
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_declared_standard_name_and_units_are_asserted(monkeypatch, base_env, capsys):
+    env = base_env | {"INPUT_VARIABLES": "t2m=air_temperature:K,u10=northward_wind,v10:K"}
+    assert invoke(monkeypatch, env) == 3
+
+    stderr = capsys.readouterr().err
+    assert "'u10' has standard_name 'eastward_wind'" in stderr
+    assert "'v10' has units 'm s-1'" in stderr
+    assert "'t2m'" not in stderr
+
+
+def test_matching_standard_names_and_units_pass(monkeypatch, base_env):
+    env = base_env | {"INPUT_VARIABLES": "t2m=air_temperature:K,u10=eastward_wind:m s-1"}
+    assert invoke(monkeypatch, env) == 0
 
 
 def test_missing_store_exits_3(monkeypatch, base_env, tmp_path):

@@ -239,3 +239,49 @@ def test_provenance_does_not_clobber_the_fixed_dataset_attributes(monkeypatch):
 
     assert "source" in fixed
     assert not set(fixed) & set(config.provenance())
+
+
+def test_output_only_level_coordinate_must_have_a_known_cf_description():
+    env = MINIMAL | {"LEVEL_COORDS": "myLevels:1/2", "OUTPUT_VARIABLES": "z@myLevels"}
+    with pytest.raises(ConfigError, match="not one of the known level coordinates"):
+        Config.from_env(env)
+
+
+def test_known_output_only_level_coordinate_is_accepted():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "heightAboveGround:10/100",
+        "OUTPUT_VARIABLES": "u@heightAboveGround",
+    }
+    assert Config.from_env(env).n_output_channels == 2
+
+
+def test_level_coordinate_read_from_the_input_needs_no_known_description():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "myLevels:1/2",
+        "INPUT_VARIABLES": "q@myLevels",
+        "OUTPUT_VARIABLES": "q@myLevels",
+    }
+    assert Config.from_env(env).n_output_channels == 2
+
+
+def test_output_only_level_check_is_collected_with_other_problems():
+    """Integration of #7 and #10: the level check joins the collected problems."""
+    env = MINIMAL | {
+        "LEVEL_COORDS": "myLevels:1/2",
+        "OUTPUT_VARIABLES": "z@myLevels",
+        "OUTPUT_MODE": "vibes",
+    }
+    with pytest.raises(ConfigError) as exc:
+        Config.from_env(env)
+    assert "not one of the known level coordinates" in str(exc.value)
+    assert "OUTPUT_MODE" in str(exc.value)
+
+
+def test_output_only_level_check_skipped_when_a_variable_list_failed():
+    """Integration of #7 and #10: a failed list is None, which must not crash the check."""
+    env = {k: v for k, v in MINIMAL.items() if k != "INPUT_VARIABLES"} | {
+        "LEVEL_COORDS": "myLevels:1/2",
+        "OUTPUT_VARIABLES": "z@myLevels",
+    }
+    with pytest.raises(ConfigError, match="INPUT_VARIABLES is required"):
+        Config.from_env(env)
