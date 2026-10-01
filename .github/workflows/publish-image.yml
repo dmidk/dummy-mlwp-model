@@ -135,14 +135,20 @@ jobs:
               )
           '
 
-          # Build a tiny input store with the image's own xarray.
+          # Build a tiny input store with the image's own xarray. The coordinates carry
+          # CF attributes, as a real input's would: matching coordinates by name alone is
+          # a fallback, not something the smoke test should depend on.
           $DOCKER --entrypoint python "$LOCAL_IMAGE" -c "
           import numpy as np, pandas as pd, xarray as xr
           xr.Dataset(
-              {'t2m': (('time', 'y', 'x'), np.zeros((3, 8, 8), 'float32'))},
+              {'t2m': (('time', 'y', 'x'), np.zeros((3, 8, 8), 'float32'), {'units': 'K'})},
               coords={
-                  'time': pd.date_range('2024-01-01', periods=3, freq='6h'),
-                  'y': np.arange(8.0), 'x': np.arange(8.0),
+                  'time': ('time', pd.date_range('2024-01-01', periods=3, freq='6h'),
+                           {'standard_name': 'time', 'axis': 'T'}),
+                  'y': ('y', np.arange(8.0) * 2500.0,
+                        {'standard_name': 'projection_y_coordinate', 'axis': 'Y', 'units': 'm'}),
+                  'x': ('x', np.arange(8.0) * 2500.0,
+                        {'standard_name': 'projection_x_coordinate', 'axis': 'X', 'units': 'm'}),
               },
           ).to_zarr('/data/in.zarr', mode='w', consolidated=True, zarr_format=3)
           "
