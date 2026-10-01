@@ -16,6 +16,7 @@ from loguru import logger
 from .config import Config
 from .errors import InputError, format_problems
 from .grid import CoordNames, validate_grid
+from .storage import storage_error, storage_exceptions
 from .timeaxis import validate_times
 from .varspec import VarSpec, channel_layout
 
@@ -41,6 +42,8 @@ def open_input(uri: str, storage_options: dict[str, Any] | None = None) -> xr.Da
     ------
     InputError
         If the store is missing or cannot be read as zarr.
+    StorageError
+        If the store cannot be reached: credentials, access, endpoint.
 
     Notes
     -----
@@ -55,7 +58,16 @@ def open_input(uri: str, storage_options: dict[str, Any] | None = None) -> xr.Da
             decode_timedelta=True,
             storage_options=storage_options or None,
         )
-    except (FileNotFoundError, KeyError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        # Nothing there, or nothing zarr there (zarr's GroupNotFoundError is one of
+        # these): a wrong INPUT_ZARR, not a failure to reach the store. s3fs reports a
+        # missing bucket or key this way too.
+        raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
+    except storage_exceptions() as exc:
+        # Before ValueError: a few botocore errors (an unknown endpoint or region) are
+        # ValueErrors too, and they are storage failures, not a malformed store.
+        raise storage_error("SRC", uri, storage_options, "open", exc) from exc
+    except (KeyError, ValueError) as exc:
         raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
 
 
@@ -306,18 +318,29 @@ def stack_channels(
     numpy.ndarray
         A ``(time, channel, y, x)`` float32 array. Non-finite values are replaced with
         zero, with a warning, so they cannot poison the forward pass.
+
+    Raises
+    ------
+    StorageError
+        If reading the data fails: this is where the store's chunks are actually
+        fetched, so the first place a read permission or a flaky endpoint can bite.
     """
     layout = channel_layout(specs, config.level_coords)
     n_time = ds.sizes[coords.time]
     shape = (n_time, len(layout), ds.sizes[coords.y], ds.sizes[coords.x])
     out = np.empty(shape, dtype="float32")
 
-    for channel, (spec, level_index) in enumerate(layout):
-        da = ds[spec.name]
-        if level_index is not None:
-            da = da.isel({spec.level_coord: level_index})
-        da = da.transpose(coords.time, coords.y, coords.x)
-        out[:, channel] = da.values.astype("float32")
+    try:
+        for channel, (spec, level_index) in enumerate(layout):
+            da = ds[spec.name]
+            if level_index is not None:
+                da = da.isel({spec.level_coord: level_index})
+            da = da.transpose(coords.time, coords.y, coords.x)
+            out[:, channel] = da.values.astype("float32")
+    except storage_exceptions() as exc:
+        raise storage_error(
+            "SRC", config.input_zarr, config.src_storage_options, "read", exc
+        ) from exc
 
     if not np.isfinite(out).all():
         n_bad = int((~np.isfinite(out)).sum())
