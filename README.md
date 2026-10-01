@@ -117,8 +117,9 @@ model does — which is the property a scheduler test actually cares about.
 | 4 | Device error — a GPU was requested but is unusable |
 | 1 | Anything unexpected (traceback logged) |
 
-Input validation collects *every* problem before failing, so one run of a misconfigured
-pipeline reports all of them rather than one per debugging cycle.
+Configuration parsing and input validation both collect *every* problem before failing,
+so one run of a misconfigured pipeline reports all of them rather than one per debugging
+cycle.
 
 ## Running it
 
