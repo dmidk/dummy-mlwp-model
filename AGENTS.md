@@ -31,11 +31,11 @@ src/dummy_mlwp/
   varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
   grid.py       cf-xarray coordinate discovery + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
-  storage.py    per-side (SRC_/DST_) fsspec options for the two stores
+  storage.py    per-side (SRC_/DST_) fsspec options; storage failures -> StorageError
   inputs.py     open the store, assert it matches the config, pack channels
   model.py      DummyNet, device selection, forward pass, rollout
   outputs.py    assemble the output dataset, write zarr
-  errors.py     ConfigError / InputError / DeviceError, each with an exit code
+  errors.py     ConfigError / InputError / DeviceError / StorageError, each with an exit code
 scripts/
   make_test_input.py   synthetic input generator, reused by the test fixtures
 tests/
@@ -51,6 +51,10 @@ tests/
 - **Line length 100.** Run `ruff format .` rather than hand-wrapping.
 - **Versioning is `hatch-vcs` from the git tag.** Never hardcode a version; never edit
   `src/dummy_mlwp/_version.py`, which is generated.
+- **Store I/O maps its failures to `StorageError` (exit 5).** Wrap any new read or write
+  of a store in `except storage_exceptions() as exc: raise storage_error(...) from exc`
+  (both in `storage.py`). Never widen that to bare `Exception`: a programming error must
+  stay exit 1 with its traceback. A missing *input* store stays an `InputError` (exit 3).
 - Prefer the existing helpers over new ones: `channel_layout` is the single source of
   truth for channel ordering, and `scripts/make_test_input.py:build` is the single
   synthetic-data generator (the test fixtures import it).

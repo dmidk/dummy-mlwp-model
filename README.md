@@ -119,7 +119,16 @@ model does — which is the property a scheduler test actually cares about.
 | 2 | Configuration error — a missing or malformed environment variable |
 | 3 | Input error — the store does not match the configured expectations |
 | 4 | Device error — a GPU was requested but is unusable |
+| 5 | Storage error — a store could not be reached, read or written: missing or rejected credentials, access denied, an unreachable endpoint, a read-only destination |
 | 1 | Anything unexpected (traceback logged) |
+
+An input store that does not exist — no such path, bucket or key — is an input error
+(3), not a storage error: the backend answered, and `INPUT_ZARR` points at nothing. (S3
+answers "access denied" rather than "not found" when the caller may not list the bucket,
+so there a missing store is a 5.) On the output side nothing is expected to exist
+beforehand, so any failure to write is a 5. A storage error's message names the side, the
+URI and the underlying error, and says what to check — for S3, whether that side was
+anonymous and which endpoint it used.
 
 Input validation collects *every* problem before failing, so one run of a misconfigured
 pipeline reports all of them rather than one per debugging cycle.
@@ -181,7 +190,8 @@ uv pip install "dummy-mlwp-model[remote]"
 is the common case for a test rig, and defaulting to signed requests turns that into a
 confusing `NoCredentialsError`. Naming a profile, supplying keys, or running under an
 IAM role (ECS/EKS/EC2) all count as credentials and switch signing back on. The startup
-log says which mode each side ended up in.
+log says which mode each side ended up in, and if a store cannot be reached the run exits
+5 with a message that says so too.
 
 So a public source bucket needs no configuration at all:
 
