@@ -124,3 +124,26 @@ def test_provenance_round_trips_the_spec_strings():
     provenance = config.provenance()
     assert provenance["output_variables"] == "z:m2s-2@isobaricInhPa"
     assert provenance["source"] == "/in.zarr"
+
+
+def test_output_only_level_coordinate_must_have_a_known_cf_description():
+    env = MINIMAL | {"LEVEL_COORDS": "myLevels:1/2", "OUTPUT_VARIABLES": "z@myLevels"}
+    with pytest.raises(ConfigError, match="not one of the known level coordinates"):
+        Config.from_env(env)
+
+
+def test_known_output_only_level_coordinate_is_accepted():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "heightAboveGround:10/100",
+        "OUTPUT_VARIABLES": "u@heightAboveGround",
+    }
+    assert Config.from_env(env).n_output_channels == 2
+
+
+def test_level_coordinate_read_from_the_input_needs_no_known_description():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "myLevels:1/2",
+        "INPUT_VARIABLES": "q@myLevels",
+        "OUTPUT_VARIABLES": "q@myLevels",
+    }
+    assert Config.from_env(env).n_output_channels == 2

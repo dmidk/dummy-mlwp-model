@@ -17,7 +17,13 @@ import pandas as pd
 
 from .errors import ConfigError
 from .storage import storage_options
-from .varspec import VarSpec, channel_layout, parse_level_coords, parse_var_specs
+from .varspec import (
+    KNOWN_LEVEL_COORDS,
+    VarSpec,
+    channel_layout,
+    parse_level_coords,
+    parse_var_specs,
+)
 
 OUTPUT_MODES = ("random", "persistence", "constant", "zeros")
 DEVICES = ("auto", "cuda", "cpu")
@@ -158,6 +164,7 @@ class Config:
         output_variables = parse_var_specs(
             _require(env, "OUTPUT_VARIABLES"), level_coords, "OUTPUT_VARIABLES"
         )
+        _check_output_only_levels(input_variables, output_variables)
 
         n_input_timesteps = _get_optional_int(env, "N_INPUT_TIMESTEPS")
         if n_input_timesteps == 0:
@@ -212,6 +219,39 @@ class Config:
             model_layers=model_layers,
             zarr_format=_get_choice(env, "ZARR_FORMAT", ZARR_FORMATS, "auto"),
             log_level=env.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        )
+
+
+def _check_output_only_levels(
+    input_variables: list[VarSpec], output_variables: list[VarSpec]
+) -> None:
+    """Require a CF description for every level coordinate written but never read.
+
+    A level coordinate used by INPUT_VARIABLES takes its CF attributes from the input,
+    where they are validated. One used only by OUTPUT_VARIABLES has nothing to copy,
+    so its attributes must come from :data:`~dummy_mlwp.varspec.KNOWN_LEVEL_COORDS`.
+
+    Parameters
+    ----------
+    input_variables, output_variables : list of VarSpec
+        The parsed variable declarations.
+
+    Raises
+    ------
+    ConfigError
+        If an output-only level coordinate is not one whose CF description is known,
+        since writing it would produce a vertical coordinate no CF reader can identify.
+    """
+    read = {s.level_coord for s in input_variables if s.level_coord is not None}
+    for spec in output_variables:
+        name = spec.level_coord
+        if name is None or name in read or name in KNOWN_LEVEL_COORDS:
+            continue
+        raise ConfigError(
+            f"OUTPUT_VARIABLES: {spec} uses level coordinate {name!r}, which no input "
+            "variable uses, so there is no input coordinate to take its CF attributes "
+            f"from, and it is not one of the known level coordinates "
+            f"({', '.join(KNOWN_LEVEL_COORDS)})"
         )
 
 

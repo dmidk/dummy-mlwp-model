@@ -28,8 +28,8 @@ code-quality instincts:
 src/dummy_mlwp/
   __main__.py   entrypoint: run(), exit-code mapping, logging setup
   config.py     env -> Config dataclass; all parsing and validation
-  varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
-  grid.py       cf-xarray coordinate discovery + regular-grid validation
+  varspec.py    the name[=standard_name][:units][@levelCoord] grammar (pure, no I/O)
+  grid.py       CF-attribute coordinate discovery (cf-xarray) + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
   storage.py    per-side (SRC_/DST_) fsspec options for the two stores
   inputs.py     open the store, assert it matches the config, pack channels
@@ -108,7 +108,14 @@ Do not revisit these without being asked:
   and *before* anything reads the time axis, so the forecast anchors to the last
   **selected** timestep. Asking for more timesteps than exist is an error, never a
   silent truncation.
-- Coordinates are auto-detected with cf-xarray, overridable by env var.
+- **Coordinates are identified by CF attributes only**, via cf-xarray — never by name.
+  There is no name-matching fallback and no `guess_coord_axis`; do not add one to make a
+  non-CF store "just work". `TIME_COORD` / `Y_COORD` / `X_COORD` only choose between
+  CF-identified candidates. Level coordinates must be CF-identified as vertical.
+- A `standard_name` or `units` declared in a variable spec is asserted exactly on input
+  and written on output; undeclared ones are neither checked nor invented. Every output
+  *coordinate* carries `axis` and `standard_name`, which is why an output-only level
+  coordinate must be in `varspec.KNOWN_LEVEL_COORDS`.
 - The output store's zarr format matches the input's unless `ZARR_FORMAT` says otherwise.
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.
 - The container's CUDA base is amd64-only; there is no arm64 image.
