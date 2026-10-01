@@ -28,7 +28,8 @@ jobs:
       - name: Install uv and Python ${{ matrix.python-version }}
         # Creates .venv and puts it on PATH for every later step. The cache is keyed on
         # pyproject.toml; there is deliberately no uv.lock (see the Install step).
-        uses: astral-sh/setup-uv@v10
+        # Exact version: since v8, setup-uv publishes no floating major tags.
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python-version }}
           activate-environment: true
