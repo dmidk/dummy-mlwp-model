@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from dummy_mlwp.errors import ConfigError
-from dummy_mlwp.storage import storage_options
+from dummy_mlwp.storage import _redact, storage_options
 
 S3 = "s3://bucket/in.zarr"
 OTHER_S3 = "s3://other-bucket/out.zarr"
@@ -164,6 +167,205 @@ def test_json_overrides_the_dedicated_variables():
 def test_malformed_json_is_rejected(value, message):
     with pytest.raises(ConfigError, match=message):
         storage_options({"SRC_STORAGE_OPTIONS": value}, S3, "SRC")
+
+
+# --- redaction of the startup log line -----------------------------------------------
+
+
+def test_nested_secrets_are_redacted():
+    options = {
+        "profile": "dmi-minio",
+        "client_kwargs": {
+            "endpoint_url": "https://s3.dmi.dk",
+            "region_name": "eu-north-1",
+            "aws_access_key_id": "AKIAnested",
+            "aws_secret_access_key": "nested-shh",
+            "aws_session_token": "nested-session",
+        },
+        "config_kwargs": {"s3": {"addressing_style": "path"}, "max_pool_connections": 4},
+    }
+    assert _redact(options) == {
+        "profile": "dmi-minio",
+        "client_kwargs": {
+            "endpoint_url": "https://s3.dmi.dk",
+            "region_name": "eu-north-1",
+            "aws_access_key_id": "***",
+            "aws_secret_access_key": "***",
+            "aws_session_token": "***",
+        },
+        "config_kwargs": {"s3": {"addressing_style": "path"}, "max_pool_connections": 4},
+    }
+
+
+def test_secret_name_masks_the_whole_value_even_when_it_is_an_object():
+    """A gcsfs service-account dict under ``token`` goes as one, not field by field."""
+    token = {"type": "service_account", "client_email": "sa@p.iam", "private_key": "-----"}
+    assert _redact({"project": "my-gcp-project", "token": token}) == {
+        "project": "my-gcp-project",
+        "token": "***",
+    }
+
+
+def test_service_account_fields_are_masked_under_a_non_secret_name():
+    info = {
+        "type": "service_account",
+        "project_id": "my-gcp-project",
+        "private_key_id": "abc123",
+        "private_key": "-----BEGIN PRIVATE KEY-----",
+        "client_email": "runner@my-gcp-project.iam.gserviceaccount.com",
+        "client_secret": "oauth-shh",
+        "refresh_token": "refresh-shh",
+    }
+    redacted = _redact({"session_kwargs": {"info": info}})["session_kwargs"]["info"]
+    assert redacted["private_key_id"] == "***"
+    assert redacted["private_key"] == "***"
+    assert redacted["client_secret"] == "***"
+    assert redacted["refresh_token"] == "***"
+    # Identifies the account rather than authenticating as it, so it stays readable.
+    assert redacted["client_email"] == info["client_email"]
+    assert redacted["project_id"] == "my-gcp-project"
+
+
+def test_lists_of_dicts_are_redacted():
+    options = {
+        "candidates": [
+            {"profile": "first", "secret": "list-shh"},
+            ("tuple-item", {"password": "tuple-shh"}),
+            "plain",
+            3,
+        ]
+    }
+    assert _redact(options) == {
+        "candidates": [
+            {"profile": "first", "secret": "***"},
+            ("tuple-item", {"password": "***"}),
+            "plain",
+            3,
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "key",
+        "secret",
+        "token",
+        "password",
+        "passwd",
+        "passphrase",
+        "credential",
+        "credentials",
+        "auth",
+        "Authorization",
+        "SSECustomerKey",
+        "sas_token",
+        "account_key",
+        "connection_string",
+    ],
+)
+def test_secret_names_are_masked(name):
+    assert _redact({"headers": {name: "shh"}}) == {"headers": {name: "***"}}
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("profile", "dmi-minio"),
+        ("region_name", "eu-north-1"),
+        ("endpoint_url", "https://s3.dmi.dk"),
+        ("project", "my-gcp-project"),
+        ("client_email", "runner@my-gcp-project.iam.gserviceaccount.com"),
+        ("anon", True),
+        ("requester_pays", True),
+        ("version_aware", False),
+        ("default_block_size", 5242880),
+        ("signature_version", "s3v4"),
+        ("tcp_keepalive", True),
+        ("client_kwargs", {}),
+        ("s3_additional_kwargs", {"ACL": "private"}),
+    ],
+)
+def test_realistic_non_secret_options_stay_visible(name, value):
+    assert _redact({name: value}) == {name: value}
+
+
+def test_url_passwords_are_masked_but_user_and_host_kept():
+    options = {
+        "client_kwargs": {"endpoint_url": "https://minio-user:url-shh@s3.dmi.dk:9000/"},
+        "config_kwargs": {"proxies": {"https": "http://proxy-user:proxy-shh@proxy.dmi.dk:3128"}},
+    }
+    redacted = _redact(options)
+    assert redacted["client_kwargs"]["endpoint_url"] == "https://minio-user:***@s3.dmi.dk:9000/"
+    assert (
+        redacted["config_kwargs"]["proxies"]["https"] == "http://proxy-user:***@proxy.dmi.dk:3128"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://s3.dmi.dk",
+        "https://only-a-user@s3.dmi.dk",
+        "eu-north-1",
+        "not a url: at all",
+        "http://[::1",  # urlsplit raises on this; redaction must not
+    ],
+)
+def test_strings_without_a_url_password_are_unchanged(value):
+    assert _redact({"endpoint_url": value}) == {"endpoint_url": value}
+
+
+def test_redaction_does_not_modify_the_options_passed_to_fsspec():
+    options = {
+        "secret": "top-shh",
+        "client_kwargs": {"aws_secret_access_key": "nested-shh", "endpoint_url": "https://s3"},
+        "items": [{"token": "list-shh"}],
+    }
+    snapshot = copy.deepcopy(options)
+
+    redacted = _redact(options)
+
+    assert options == snapshot
+    assert redacted["client_kwargs"] is not options["client_kwargs"]
+    assert redacted["items"][0] is not options["items"][0]
+
+
+def test_storage_options_returns_the_real_secrets():
+    """Only the log is masked; s3fs still gets the credentials it was given."""
+    env = {"SRC_STORAGE_OPTIONS": '{"client_kwargs": {"aws_secret_access_key": "nested-shh"}}'}
+    options = storage_options(env, S3, "SRC")
+    assert options["client_kwargs"]["aws_secret_access_key"] == "nested-shh"
+
+
+def test_nested_destination_secret_stays_out_of_the_startup_log(monkeypatch, base_env, capsys):
+    """Drive the whole application, and read the log a pipeline would actually see."""
+    from dummy_mlwp.__main__ import main
+
+    storage = {
+        "client_kwargs": {"region_name": "eu-north-1", "aws_secret_access_key": "nested-shh"},
+        "config_kwargs": {"proxies": {"https": "http://proxy-user:proxy-shh@proxy.dmi.dk"}},
+        "session_kwargs": [{"private_key": "pem-shh", "client_email": "sa@p.iam"}],
+    }
+    env = base_env | {
+        # memory:// stands in for s3:// and accepts (and ignores) these options.
+        "OUTPUT_ZARR": "memory://redacted-startup-log.zarr",
+        "DST_STORAGE_OPTIONS": json.dumps(storage),
+        "N_FORECAST_STEPS": "1",
+    }
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert main() == 0
+
+    stderr = capsys.readouterr().err
+    line = next(line for line in stderr.splitlines() if "DST storage options" in line)
+    for secret in ("nested-shh", "proxy-shh", "pem-shh"):
+        assert secret not in stderr
+    assert "eu-north-1" in line
+    assert "proxy-user:***@proxy.dmi.dk" in line
+    assert "sa@p.iam" in line
 
 
 # --- the options have to be ones s3fs actually understands --------------------------
