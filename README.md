@@ -203,7 +203,7 @@ credentials masked (see [Remote stores](#remote-stores)).
 ### Locally
 
 ```sh
-uv venv && uv pip install -e ".[dev]"
+uv sync --extra cpu --extra remote --extra dev   # on linux/x86_64; see Development
 python scripts/make_test_input.py /tmp/in.zarr --kind projected --levels 850 500 250
 
 INPUT_ZARR=/tmp/in.zarr \
@@ -454,9 +454,19 @@ the image's version matches the tag before pushing anything.
 ## Development
 
 ```sh
-uv pip install -e ".[dev]"
+uv sync --extra cpu --extra remote --extra dev
 pytest
 ruff check . && ruff format --check .
 ```
 
 The test suite is CPU-only and needs no container.
+
+Dependency versions are pinned in `uv.lock`, and CI and the container image both install
+from it. torch comes as a CPU build (`cpu` extra, for CI and development) or a CUDA 12.4
+build (`cu124` extra, for the image), both at the same version. One CI job always runs
+the container's own Python version with the locked dependencies, so CI tests exactly
+what the image ships. After changing a dependency, run `uv lock`; CI fails if the lock
+is out of date.
+
+The lock covers linux/x86_64, where CI and the container run. On other platforms,
+`uv pip install -e ".[dev]"` installs unpinned versions instead.
