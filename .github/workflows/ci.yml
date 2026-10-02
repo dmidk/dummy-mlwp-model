@@ -17,7 +17,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # "container" is the image's own Python, read from the Dockerfile, so one job
+        # always tests exactly what the container runs: that Python with the locked
+        # dependencies. Further entries test other versions on top.
+        python: ["container", "3.12"]
 
     steps:
       - uses: actions/checkout@v7
@@ -26,26 +29,39 @@ jobs:
           # tags have to be present or the build reports a bogus version.
           fetch-depth: 0
 
-      - name: Install uv and Python ${{ matrix.python-version }}
-        # Creates .venv and puts it on PATH for every later step. The cache is keyed on
-        # pyproject.toml; there is deliberately no uv.lock (see the Install step).
+      - name: Resolve the Python version
+        id: python
+        run: |
+          if [ "${{ matrix.python }}" = container ]; then
+            version=$(sed -n 's/^ARG PYTHON_VERSION=//p' Dockerfile)
+            if [ -z "$version" ]; then
+              echo "::error::no 'ARG PYTHON_VERSION=' line in the Dockerfile"
+              exit 1
+            fi
+          else
+            version="${{ matrix.python }}"
+          fi
+          echo "Testing Python $version (matrix entry: ${{ matrix.python }})"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv and Python ${{ steps.python.outputs.version }}
+        # Creates .venv and puts it on PATH for every later step. The uv version comes
+        # from required-version in pyproject.toml, the cache key from uv.lock.
         # Exact version: since v8, setup-uv publishes no floating major tags.
         uses: astral-sh/setup-uv@v10.2.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ steps.python.outputs.version }}
           activate-environment: true
           enable-cache: true
 
-      - name: Install
-        # CPU-only torch keeps this job fast and off the CUDA stack; the test suite
-        # runs with DEVICE=cpu, so it covers everything except the GPU path itself.
-        run: |
-          uv pip install --index-url https://download.pytorch.org/whl/cpu torch
-          uv pip install -e ".[dev]"
+      - name: Install from the lock
+        # --locked fails if uv.lock has fallen behind pyproject.toml. The cpu extra is
+        # the same torch version the image gets through cu124, as a CPU build; the
+        # test suite runs with DEVICE=cpu, so it covers everything but the GPU path.
+        run: uv sync --locked --extra cpu --extra remote --extra dev
 
-      # The steps below call the venv's tools directly, never through `uv run`: in a
-      # directory with a pyproject.toml, `uv run` locks and syncs the project from PyPI,
-      # which would swap the CPU-only torch above for the multi-GB CUDA build.
+      # The steps below call the venv's tools directly. `uv run` would work too now,
+      # but it would need the same --extra flags to keep the environment as synced.
 
       - name: Lint
         run: |
