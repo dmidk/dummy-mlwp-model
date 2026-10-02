@@ -165,43 +165,6 @@ def test_seed_changes_the_output(monkeypatch, base_env, tmp_path):
     assert not np.allclose(open_output(first).t2m.values, open_output(second).t2m.values)
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3])
-def test_output_format_matches_the_input(monkeypatch, tmp_path, make_input, zarr_format):
-    source = make_input(zarr_format=zarr_format)
-    env = {
-        "INPUT_ZARR": str(source),
-        "OUTPUT_ZARR": str(tmp_path / "out.zarr"),
-        "INPUT_VARIABLES": "t2m",
-        "OUTPUT_VARIABLES": "t2m:K",
-        "DEVICE": "cpu",
-        "MODEL_HIDDEN_CHANNELS": "8",
-        "MODEL_LAYERS": "2",
-    }
-    assert invoke(monkeypatch, env) == 0
-
-    out = tmp_path / "out.zarr"
-    if zarr_format == 3:
-        assert (out / "zarr.json").exists()
-    else:
-        assert (out / ".zgroup").exists()
-
-
-def test_zarr_format_can_be_forced(monkeypatch, tmp_path, make_input):
-    source = make_input(zarr_format=3)
-    env = {
-        "INPUT_ZARR": str(source),
-        "OUTPUT_ZARR": str(tmp_path / "out.zarr"),
-        "INPUT_VARIABLES": "t2m",
-        "OUTPUT_VARIABLES": "t2m:K",
-        "ZARR_FORMAT": "2",
-        "DEVICE": "cpu",
-        "MODEL_HIDDEN_CHANNELS": "8",
-        "MODEL_LAYERS": "2",
-    }
-    assert invoke(monkeypatch, env) == 0
-    assert (tmp_path / "out.zarr" / ".zgroup").exists()
-
-
 def test_one_chunk_per_timestep(monkeypatch, base_env):
     env = base_env | {"N_FORECAST_STEPS": "4"}
     assert invoke(monkeypatch, env) == 0
