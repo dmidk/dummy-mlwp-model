@@ -23,6 +23,17 @@ RUN git describe --tags --dirty --always \
     && uv build --wheel --out-dir /dist \
     && ls -la /dist
 
+# torch and its CUDA libraries, cut out of uv.lock with their hashes, for the runtime
+# stage's torch layer. They all install from the PyTorch index (its URL read from
+# pyproject.toml, so it is defined once), which serves byte-identical copies of the
+# nvidia-* and triton wheels, so the lock's hashes verify them from there too.
+RUN uv export --frozen --no-emit-project --extra cu124 --output-file /tmp/all.txt \
+    && index=$(python -c "import tomllib; print(next(i['url'] for i in tomllib.load(open('pyproject.toml', 'rb'))['tool']['uv']['index'] if i['name'] == 'pytorch-cu124'))") \
+    && { echo "--index-url $index"; \
+         awk '/^[^ #-]/ { keep = /^(torch|triton|nvidia-[a-z0-9-]+)==/ } keep' /tmp/all.txt; } \
+       > /torch.txt \
+    && grep -E '^(--index-url|[a-z])' /torch.txt
+
 # ---------------------------------------------------------------------------------
 # Runtime stage: CUDA base + the locked dependencies, then the wheel.
 #
@@ -60,11 +71,20 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.22 /uv /usr/local/bin/uv
 RUN uv python install ${PYTHON_VERSION} \
     && uv venv --python ${PYTHON_VERSION} ${VIRTUAL_ENV}
 
-# Every dependency exactly as uv.lock pins it — the versions CI tests — with torch's
-# CUDA 12.4 build (the cu124 extra) and the s3fs/gcsfs backends (remote). Only
-# pyproject.toml and uv.lock are mounted in, so this layer rebuilds when the lock
-# changes, not on every commit. --frozen installs the lock as is; CI's --locked is
-# what fails a lock that has fallen behind pyproject.toml.
+# torch first, as its own layer: about 3 GB, and it changes far less often than
+# anything else. Its pins come from uv.lock (see the build stage), and Docker caches
+# this layer by their content alone, so a lock update that leaves torch alone does not
+# rebuild it — and a GPU node that already has it does not pull it again.
+COPY --from=build /torch.txt /tmp/torch.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-deps --require-hashes -r /tmp/torch.txt
+
+# Then every other dependency, exactly as uv.lock pins it — the versions CI tests —
+# with torch's CUDA 12.4 build (the cu124 extra) and the s3fs/gcsfs backends (remote).
+# torch is already installed at the locked versions, so uv sync keeps it and adds the
+# rest; if anything differed, it would bring it to the lock. Only pyproject.toml and
+# uv.lock are mounted in, so this layer rebuilds when the lock changes, not on every
+# commit. --frozen installs the lock as is; CI's --locked fails a stale lock.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=/tmp/lock/pyproject.toml \
     --mount=type=bind,source=uv.lock,target=/tmp/lock/uv.lock \
