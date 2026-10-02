@@ -73,6 +73,12 @@ RUN useradd --create-home --uid 1000 model
 USER model
 WORKDIR /home/model
 
+# The image exists to exercise a GPU, so it requires one: started without GPU access it
+# exits 4 instead of quietly running on CPU. Pass DEVICE=cpu (or auto) to run without a
+# GPU, as the CI smoke test does — its runners have none. Set here, after the installs,
+# so that changing it never invalidates the torch layer. The Python default stays auto.
+ENV DEVICE=cuda
+
 # Configuration is entirely environmental, so there are no CMD arguments to pass.
 ENTRYPOINT ["python", "-m", "dummy_mlwp"]
 
