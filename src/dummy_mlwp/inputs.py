@@ -15,7 +15,8 @@ from loguru import logger
 
 from .config import Config
 from .errors import InputError, format_problems
-from .grid import CoordNames, validate_grid
+from .grid import CoordNames, is_vertical_coord, validate_grid
+from .storage import storage_error, storage_exceptions
 from .timeaxis import validate_times
 from .varspec import VarSpec, channel_layout
 
@@ -41,6 +42,8 @@ def open_input(uri: str, storage_options: dict[str, Any] | None = None) -> xr.Da
     ------
     InputError
         If the store is missing or cannot be read as zarr.
+    StorageError
+        If the store cannot be reached: credentials, access, endpoint.
 
     Notes
     -----
@@ -55,7 +58,16 @@ def open_input(uri: str, storage_options: dict[str, Any] | None = None) -> xr.Da
             decode_timedelta=True,
             storage_options=storage_options or None,
         )
-    except (FileNotFoundError, KeyError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        # Nothing there, or nothing zarr there (zarr's GroupNotFoundError is one of
+        # these): a wrong INPUT_ZARR, not a failure to reach the store. s3fs reports a
+        # missing bucket or key this way too.
+        raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
+    except storage_exceptions() as exc:
+        # Before ValueError: a few botocore errors (an unknown endpoint or region) are
+        # ValueErrors too, and they are storage failures, not a malformed store.
+        raise storage_error("SRC", uri, storage_options, "open", exc) from exc
+    except (KeyError, ValueError) as exc:
         raise InputError(f"Could not open input store {uri!r}: {exc}") from exc
 
 
@@ -89,6 +101,10 @@ def detect_zarr_format(uri: str, storage_options: dict[str, Any] | None = None) 
 
 def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
     """Assert the input matches INPUT_VARIABLES, the grid assumption and the time axis.
+
+    This includes the CF metadata: level coordinates must identify themselves as
+    vertical, and any ``standard_name`` or ``units`` declared in INPUT_VARIABLES must
+    match the variable's attributes.
 
     Parameters
     ----------
@@ -204,8 +220,8 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
     Returns
     -------
     list of str
-        One message per level coordinate that is missing or whose values differ from
-        the declaration.
+        One message per level coordinate that is missing, is not identified as
+        vertical by its CF attributes, or whose values differ from the declaration.
     """
     problems: list[str] = []
     for name in sorted(_referenced_level_coords(config)):
@@ -215,6 +231,12 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
                 f"level coordinate {name!r} (from LEVEL_COORDS) is not present in the input"
             )
             continue
+        if not is_vertical_coord(ds, name):
+            problems.append(
+                f"level coordinate {name!r} is not identified as a vertical coordinate by "
+                "its CF attributes; it needs axis='Z', positive='up'/'down', a vertical "
+                "standard_name such as 'air_pressure' or 'height', or pressure units"
+            )
         actual = ds[name].values
         if actual.shape != expected.shape or not np.allclose(
             actual.astype("float64"), expected.astype("float64")
@@ -227,10 +249,13 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
 
 
 def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> list[str]:
-    """Check each declared input variable exists with the implied dimensions.
+    """Check each declared input variable exists with the implied dimensions and attributes.
 
     Dimension *order* is not checked — a store may hold ``(x, time, y)`` and it is
-    transposed later — but the set of dimensions must match exactly.
+    transposed later — but the set of dimensions must match exactly. A declared
+    ``standard_name`` or ``units`` must match the variable's attribute exactly; units
+    are compared as strings, so ``'m s-1'`` and ``'m/s'`` are different on purpose. An
+    attribute that is not declared is not checked.
 
     Parameters
     ----------
@@ -244,7 +269,9 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
     Returns
     -------
     list of str
-        One message per missing variable or dimension mismatch.
+        One message per missing variable, dimension mismatch, or CF attribute that is
+        missing or differs from the declaration. A variable with both wrong dimensions
+        and a wrong attribute gets one message for each.
     """
     problems: list[str] = []
     for spec in config.input_variables:
@@ -262,7 +289,47 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
                 f"variable {spec.name!r} has dimensions {tuple(map(str, ds[spec.name].dims))} "
                 f"but {spec} implies {spec.dims(coords.time, coords.y, coords.x)}"
             )
+        problems.extend(_validate_attr(ds[spec.name], spec, "standard_name", spec.standard_name))
+        problems.extend(_validate_attr(ds[spec.name], spec, "units", spec.units))
     return problems
+
+
+def _validate_attr(da: xr.DataArray, spec: VarSpec, key: str, expected: str | None) -> list[str]:
+    """Check one declared CF attribute of an input variable.
+
+    Parameters
+    ----------
+    da : xarray.DataArray
+        The input variable.
+    spec : VarSpec
+        Its declaration, for the message.
+    key : {'standard_name', 'units'}
+        Attribute to check.
+    expected : str or None
+        Declared value; ``None`` means nothing was declared, so nothing is checked.
+
+    Returns
+    -------
+    list of str
+        At most one message: the attribute is missing, or differs from ``expected``. An
+        attribute that is not a string never matches.
+    """
+    if expected is None:
+        return []
+    actual = da.attrs.get(key)
+    if actual is None:
+        return [
+            f"variable {spec.name!r} has no {key!r} attribute but INPUT_VARIABLES declares "
+            f"{key} {expected!r}"
+        ]
+    # isinstance first: a non-string attribute never matches, and comparing an
+    # array-valued attribute with == would not give a single truth value.
+    if not (isinstance(actual, str) and actual == expected):
+        return [
+            f"variable {spec.name!r} has {key} {actual!r} but INPUT_VARIABLES declares "
+            f"{key} {expected!r} (compared as exact strings, no conversion)"
+        ]
+    return []
 
 
 def _fmt(values: np.ndarray) -> str:
@@ -306,18 +373,29 @@ def stack_channels(
     numpy.ndarray
         A ``(time, channel, y, x)`` float32 array. Non-finite values are replaced with
         zero, with a warning, so they cannot poison the forward pass.
+
+    Raises
+    ------
+    StorageError
+        If reading the data fails: this is where the store's chunks are actually
+        fetched, so the first place a read permission or a flaky endpoint can bite.
     """
     layout = channel_layout(specs, config.level_coords)
     n_time = ds.sizes[coords.time]
     shape = (n_time, len(layout), ds.sizes[coords.y], ds.sizes[coords.x])
     out = np.empty(shape, dtype="float32")
 
-    for channel, (spec, level_index) in enumerate(layout):
-        da = ds[spec.name]
-        if level_index is not None:
-            da = da.isel({spec.level_coord: level_index})
-        da = da.transpose(coords.time, coords.y, coords.x)
-        out[:, channel] = da.values.astype("float32")
+    try:
+        for channel, (spec, level_index) in enumerate(layout):
+            da = ds[spec.name]
+            if level_index is not None:
+                da = da.isel({spec.level_coord: level_index})
+            da = da.transpose(coords.time, coords.y, coords.x)
+            out[:, channel] = da.values.astype("float32")
+    except storage_exceptions() as exc:
+        raise storage_error(
+            "SRC", config.input_zarr, config.src_storage_options, "read", exc
+        ) from exc
 
     if not np.isfinite(out).all():
         n_bad = int((~np.isfinite(out)).sum())

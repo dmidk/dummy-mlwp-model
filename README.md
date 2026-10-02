@@ -20,11 +20,36 @@ waiting for the real model. To be useful in that role it is deliberately:
 - There is a **time axis**, strictly increasing and evenly spaced.
 - Variables are `(time, y, x)`, or `(time, level, y, x)` when a level coordinate is declared.
   Dimension order in the store does not matter; it is transposed as needed.
+- **Every coordinate describes itself with CF attributes.** Coordinates are identified
+  with [cf-xarray](https://cf-xarray.readthedocs.io/) from their attributes alone — never
+  from their names — so a store whose `time` variable carries no CF metadata is rejected
+  (exit 3), however obvious the name looks:
 
-Coordinates are discovered with [cf-xarray](https://cf-xarray.readthedocs.io/) from CF
-attributes, and can be overridden when the store is not CF-compliant.
+  | Axis | Identified by (any one of) |
+  | --- | --- |
+  | time | `axis: T`, `standard_name: time`, or CF time units (`hours since …`) |
+  | y | `axis: Y`, `standard_name: latitude` / `projection_y_coordinate` / `grid_latitude`, or `units: degrees_north` |
+  | x | `axis: X`, `standard_name: longitude` / `projection_x_coordinate` / `grid_longitude`, or `units: degrees_east` |
+  | level | `axis: Z`, `positive: up`/`down`, a vertical `standard_name` (`air_pressure`, `height`, …), or pressure units |
+
+  A projected store that also carries 2D latitude/longitude auxiliary coordinates
+  resolves to its projected `x`/`y`, since `axis`/projection standard names win.
 
 ## Configuration
+
+A variable this application does not read has no effect, so `N_FORECAST_STEP=8` (no `S`)
+would quietly leave `N_FORECAST_STEPS` at its default. To catch that, any set variable
+that looks meant for this application but is not one it reads — a close misspelling or
+wrong-case spelling of a known name, or an unknown `SRC_`/`DST_` name — is logged at
+startup as a warning with a suggestion:
+
+```
+WARNING  | dummy_mlwp.envvars - Environment variable N_FORECAST_STEP has no effect: this application does not read it. Did you mean N_FORECAST_STEPS?
+```
+
+This is a warning, not an error: a container's environment is mostly not ours —
+Kubernetes service links such as `INPUT_SERVICE_HOST`, `NVIDIA_*`, boto's own `AWS_*` —
+and none of it should fail a run. Only names are logged, never values.
 
 ### Paths and variables
 
@@ -39,18 +64,33 @@ attributes, and can be overridden when the store is not CF-compliant.
 Variable spec grammar, per comma-separated entry:
 
 ```
-name[:units][@levelCoordName]
+name[=standard_name][:units][@levelCoordName]
 ```
 
 ```sh
 LEVEL_COORDS=isobaricInhPa:850/500/250,heightAboveGround:10/100
-INPUT_VARIABLES=t2m,u10,v10,t@isobaricInhPa
-OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa
+INPUT_VARIABLES=t2m=air_temperature:K,u10=eastward_wind,v10,t:K@isobaricInhPa
+OUTPUT_VARIABLES=t2m=air_temperature:K,tp:mm,z:m2s-2@isobaricInhPa,leewave
 ```
 
 On input the spec is an assertion: the variable must exist with exactly those dimensions,
-and a referenced level coordinate must match `LEVEL_COORDS` value for value. On output it
-is a construction instruction — `units` is written to the variable's attributes.
+a referenced level coordinate must match `LEVEL_COORDS` value for value and be
+CF-identified as vertical, and any declared `standard_name` or `units` must equal the
+variable's attribute exactly. Units are compared as plain strings with no unit parsing
+or normalisation: `u10:m/s` fails against a store that says `m s-1`, and a variable
+with no `units` attribute fails any declared units. Leave an attribute off an input
+entry to skip its check. On output the spec is a construction instruction —
+`standard_name` and `units` are written to the variable's attributes.
+
+Both are optional, because not every field has a CF standard name — a model-specific
+scalar such as `leewave` above is written with neither, and nothing is invented for it.
+Its *coordinates* still carry full CF attributes: every output coordinate (time, y, x,
+levels) gets an `axis` and a `standard_name`, so a reader can identify them without
+knowing our names. Horizontal coordinates and level coordinates read from the input
+keep the input's attributes. A level coordinate used only by `OUTPUT_VARIABLES` has
+nothing to copy from, so it must be one whose CF description is built in —
+`isobaricInhPa`, `isobaricInPa`, `heightAboveGround`, `heightAboveSea`,
+`depthBelowLand`, `hybrid` (following cfgrib) — or the run fails at startup (exit 2).
 
 ### Forecast horizon
 
@@ -76,9 +116,13 @@ description of a diagnostic evaluated on its own input times.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `TIME_COORD` | auto | Override time coordinate detection |
-| `X_COORD` | auto | Override x/longitude coordinate detection |
-| `Y_COORD` | auto | Override y/latitude coordinate detection |
+| `TIME_COORD` | auto | Pick the time coordinate when CF attributes identify several |
+| `X_COORD` | auto | Pick the x/longitude coordinate when CF attributes identify several |
+| `Y_COORD` | auto | Pick the y/latitude coordinate when CF attributes identify several |
+
+An override chooses *between* CF-identified candidates; it does not excuse a coordinate
+that lacks CF attributes. Naming one that is not identified as that axis is an input
+error.
 
 ### Behaviour
 
@@ -87,7 +131,7 @@ description of a diagnostic evaluated on its own input times.
 | `OUTPUT_MODE` | `random` | `random`, `persistence`, `constant`, `zeros` — see below |
 | `RANDOM_SEED` | `0` | Seeds the network weights; runs are reproducible |
 | `CONSTANT_VALUE` | `0.0` | Used by `constant` mode |
-| `DEVICE` | `auto` | `auto`, `cuda`, `cpu`. `cuda` fails hard if no device is visible |
+| `DEVICE` | `auto` (`cuda` in the container image) | `auto`, `cuda`, `cpu`. `cuda` fails hard if no device is visible |
 | `MODEL_HIDDEN_CHANNELS` | `64` | Network width — how much GPU work happens |
 | `MODEL_LAYERS` | `4` | Network depth |
 | `ZARR_FORMAT` | `auto` | `auto` (match the input), `2`, `3` |
@@ -115,10 +159,44 @@ model does — which is the property a scheduler test actually cares about.
 | 2 | Configuration error — a missing or malformed environment variable |
 | 3 | Input error — the store does not match the configured expectations |
 | 4 | Device error — a GPU was requested but is unusable |
+| 5 | Storage error — a store could not be reached, read or written: missing or rejected credentials, access denied, an unreachable endpoint, a read-only destination |
 | 1 | Anything unexpected (traceback logged) |
 
-Input validation collects *every* problem before failing, so one run of a misconfigured
-pipeline reports all of them rather than one per debugging cycle.
+An input store that does not exist — no such path, bucket or key — is an input error
+(3), not a storage error: the backend answered, and `INPUT_ZARR` points at nothing. (S3
+answers "access denied" rather than "not found" when the caller may not list the bucket,
+so there a missing store is a 5.) On the output side nothing is expected to exist
+beforehand, so any failure to write is a 5. A storage error's message names the side, the
+URI and the underlying error, and says what to check — for S3, whether that side was
+anonymous and which endpoint it used.
+
+Configuration parsing and input validation both collect *every* problem before failing,
+so one run of a misconfigured pipeline reports all of them rather than one per debugging
+cycle.
+
+## Logs
+
+Logs go to stderr at `LOG_LEVEL`. With no command line and no config file, the log is
+the only record of what a run actually used, so startup records two things at INFO:
+
+- **the version**, as the very first line — before the configuration is parsed, so even
+  a run that exits 2 says which version failed;
+- **the effective configuration**, as soon as it parses: every setting, defaults
+  included, one line each, labelled with the environment variable that controls it.
+
+```
+INFO | __main__ - Starting dummy-mlwp-model 0.3.1
+INFO | __main__ - Effective configuration (defaults included):
+INFO | __main__ -   INPUT_ZARR            = s3://analysis/hres.zarr
+INFO | __main__ -   INPUT_VARIABLES       = t2m,u10,v10,t:K@isobaricInhPa
+INFO | __main__ -   LEVEL_COORDS          = isobaricInhPa:850/500/250
+INFO | __main__ -   N_INPUT_TIMESTEPS     = unset (all)
+INFO | __main__ -   N_FORECAST_STEPS      = 8
+...
+```
+
+The storage options are not repeated there; they are logged just before it, with
+credentials masked (see [Remote stores](#remote-stores)).
 
 ## Running it
 
@@ -131,8 +209,8 @@ python scripts/make_test_input.py /tmp/in.zarr --kind projected --levels 850 500
 INPUT_ZARR=/tmp/in.zarr \
 OUTPUT_ZARR=/tmp/out.zarr \
 LEVEL_COORDS=isobaricInhPa:850/500/250 \
-INPUT_VARIABLES=t2m,u10,v10,t:K@isobaricInhPa \
-OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa \
+INPUT_VARIABLES=t2m=air_temperature:K,u10,v10,t:K@isobaricInhPa \
+OUTPUT_VARIABLES=t2m=air_temperature:K,tp:mm,z:m2s-2@isobaricInhPa \
 N_FORECAST_STEPS=8 \
 DEVICE=cpu \
 python -m dummy_mlwp
@@ -152,16 +230,21 @@ docker run --rm --gpus all \
   -e N_FORECAST_STEPS=8 \
   -e DEVICE=cuda \
   -e MODEL_HIDDEN_CHANNELS=256 \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
-Prebuilt images are published to `ghcr.io/OWNER/dummy-mlwp-model` on every push to the
-default branch and every `v*` tag.
+Prebuilt images are published to `ghcr.io/dmidk/dummy-mlwp-model` for version tags only
+(see [Versioning](#versioning)). Pin a release, e.g. `:0.1.0` or `:0.1`; `:latest` is the
+newest final release.
 
 To confirm the GPU is genuinely in use, look for the log line reporting the device name
 and a non-zero peak GPU memory, and check that raising `MODEL_HIDDEN_CHANNELS` increases
-both. Running with `DEVICE=cuda` but without `--gpus all` exits 4 rather than silently
-falling back to CPU.
+both.
+
+The image sets `DEVICE=cuda`, so it requires a GPU by default: started without `--gpus all`
+(or without a working driver) it exits 4 rather than silently falling back to CPU. To run
+it on a machine without a GPU, override it with `-e DEVICE=cpu`, as the CI smoke test
+does. Outside the image the default stays `auto`.
 
 ### Remote stores
 
@@ -176,7 +259,8 @@ uv pip install "dummy-mlwp-model[remote]"
 is the common case for a test rig, and defaulting to signed requests turns that into a
 confusing `NoCredentialsError`. Naming a profile, supplying keys, or running under an
 IAM role (ECS/EKS/EC2) all count as credentials and switch signing back on. The startup
-log says which mode each side ended up in.
+log says which mode each side ended up in, and if a store cannot be reached the run exits
+5 with a message that says so too.
 
 So a public source bucket needs no configuration at all:
 
@@ -265,7 +349,7 @@ docker run --rm --gpus all \
   -e OUTPUT_VARIABLES=t2m:K,tp:mm \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 The image runs as uid 1000 with home `/home/model`, which is why the mount goes there —
@@ -320,7 +404,7 @@ docker run --rm --gpus all \
   -e N_INPUT_TIMESTEPS=-2 \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 Two profile names is the whole configuration: each side resolves its own host, region
@@ -338,14 +422,34 @@ already the default for the side with no credentials:
 Google Cloud Storage works the same way through `gs://` URIs, with
 `GOOGLE_APPLICATION_CREDENTIALS` or `DST_STORAGE_OPTIONS='{"project":"..."}'`.
 
-The resolved options for each side are logged at startup, with any key, secret, token
-or password value masked, so you can confirm which account and host a run used.
+The resolved options for each side are logged at startup, so you can confirm which
+account and host a run used. Any value whose name contains `key`, `secret`, `token`,
+`password`, `passwd`, `passphrase`, `credential`, `auth` or `connection_string` is
+masked as `***` at any depth, including inside `client_kwargs`, `config_kwargs` or a
+service-account object in `*_STORAGE_OPTIONS`, as is the password in a URL such as
+`https://user:pass@proxy`. Profile names, regions and endpoint hosts stay visible.
 
 ## Versioning
 
 The version is derived from the git tag by `hatch-vcs`. Tag a release as `v1.2.3` and
 the wheel, the `dummy_mlwp.__version__` attribute, the output store's `source` attribute,
 and the container tag all follow.
+
+Pushing a version tag is also the only thing that publishes an image:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+| Tag | Image tags |
+| --- | --- |
+| `v0.1.0` | `0.1.0`, `0.1`, `latest` |
+| `v0.2.0rc1` (any PEP 440 pre-, post- or dev release) | `0.2.0rc1` only; `latest` does not move |
+
+A pre-release tag is the way to get a test image onto a GPU host before a release.
+Pull requests and pushes to `main` build and smoke-test the image, but do not push it,
+and only when something that goes into the image changed. The publish job checks that
+the image's version matches the tag before pushing anything.
 
 ## Development
 
