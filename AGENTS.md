@@ -139,6 +139,10 @@ Do not revisit these without being asked:
   coordinate must be in `varspec.KNOWN_LEVEL_COORDS`.
 - The output store's zarr format matches the input's unless `ZARR_FORMAT` says otherwise.
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.
+- **The container image requires a GPU by default** (`ENV DEVICE=cuda` in the
+  Dockerfile): without GPU access it exits 4. The Python default stays `auto` for local
+  runs. CI has no GPU, so every smoke-test run that starts the model passes `DEVICE`
+  explicitly (`cpu`, or `cuda` for the exit-4 check) — keep that when adding one.
 - The container's CUDA base is amd64-only; there is no arm64 image.
 - **Images are pushed to `ghcr.io` only for version tags.** `vX.Y.Z` publishes `X.Y.Z`,
   `X.Y` and `latest`; a PEP 440 pre-, post- or dev release tag publishes only its own
