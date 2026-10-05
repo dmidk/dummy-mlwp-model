@@ -57,7 +57,8 @@ jobs:
       - name: Install from the lock
         # --locked fails if uv.lock has fallen behind pyproject.toml. The cpu extra is
         # the same torch version the image gets through cu124, as a CPU build; the
-        # test suite runs with DEVICE=cpu, so it covers everything but the GPU path.
+        # test suite runs with DEVICE=cpu, so it covers everything but the GPU path,
+        # which the gpu job below covers.
         run: uv sync --locked --extra cpu --extra remote --extra dev
 
       # The steps below call the venv's tools directly. `uv run` would work too now,
@@ -72,6 +73,7 @@ jobs:
         run: pytest -q
 
       - name: Smoke test the CLI end to end
+        # The gpu job below makes the same run on a GPU.
         run: |
           python scripts/make_test_input.py /tmp/in.zarr \
             --kind projected --levels 850 500 250
@@ -84,3 +86,99 @@ jobs:
           DEVICE=cpu \
           python -m dummy_mlwp
           python -c "import xarray as xr; print(xr.open_zarr('/tmp/out.zarr'))"
+
+  gpu:
+    # The end-to-end run on a real GPU: the one path the hosted runners cannot test.
+    # Only this runs here; lint, the test suite and everything else stay on the CPU
+    # runners above. cirun.io starts this runner on AWS for the job and removes it
+    # afterwards (see .cirun.yml). The run_id suffix gives each run its own runner;
+    # cirun ignores it when matching the label.
+    runs-on: "cirun-aws-runner--${{ github.run_id }}"
+    # Each run pays for a GPU instance, so only once the CPU job has passed, and never
+    # for a PR from a fork, which would run the fork's code on an AWS machine of ours.
+    needs: test
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    # A hung job keeps the instance running; a normal one takes a few minutes.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # hatch-vcs needs the tags, as in the test job.
+          fetch-depth: 0
+
+      - name: Read the container's Python version
+        id: python
+        # The image's Python, as in the test job's "container" entry: with the cu124
+        # extra below, this job runs what the image ships.
+        run: |
+          version=$(sed -n 's/^ARG PYTHON_VERSION=//p' Dockerfile)
+          if [ -z "$version" ]; then
+            echo "::error::no 'ARG PYTHON_VERSION=' line in the Dockerfile"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install uv and Python ${{ steps.python.outputs.version }}
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: ${{ steps.python.outputs.version }}
+          activate-environment: true
+          # Off, which is also setup-uv's default on a self-hosted runner: the CUDA build
+          # of torch is about 3 GB, which the instance downloads faster from the PyTorch
+          # index than through GitHub's cache.
+          enable-cache: false
+
+      - name: Install from the lock, with CUDA torch
+        # The cu124 extra, the torch build the image ships, instead of cpu. Nothing
+        # else: the run below needs neither the remote backends nor the dev tools.
+        env:
+          # The CUDA wheels are hundreds of MB each; uv's 30s default times out on them.
+          UV_HTTP_TIMEOUT: 300
+        run: uv sync --locked --extra cu124
+
+      - name: Show the GPU
+        run: |
+          nvidia-smi
+          python -c "import torch; print(f'torch {torch.__version__}, CUDA {torch.version.cuda}, device visible: {torch.cuda.is_available()}')"
+
+      - name: Run end to end on the GPU
+        # DEVICE=cuda makes the run exit 4 if no GPU is visible, or if the forward pass
+        # allocated no GPU memory, so exit 0 already means the work ran on the GPU. The
+        # log lines a person would look for (README, "In a container") are checked too,
+        # so this job still catches a CPU run if that check in the code ever goes.
+        run: |
+          # The default shell has no pipefail, and without it the tee would hide the
+          # run's exit code.
+          set -o pipefail
+          python scripts/make_test_input.py "$RUNNER_TEMP/in.zarr" \
+            --kind projected --levels 850 500 250
+          INPUT_ZARR="$RUNNER_TEMP/in.zarr" \
+          OUTPUT_ZARR="$RUNNER_TEMP/out.zarr" \
+          LEVEL_COORDS=isobaricInhPa:850/500/250 \
+          INPUT_VARIABLES=t2m,u10,v10,t:K@isobaricInhPa \
+          OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa \
+          N_FORECAST_STEPS=8 \
+          DEVICE=cuda \
+          python -m dummy_mlwp 2>&1 | tee "$RUNNER_TEMP/run.log"
+
+          if ! grep -q "Using CUDA device" "$RUNNER_TEMP/run.log"; then
+            echo "::error::the log names no CUDA device"
+            exit 1
+          fi
+          peak=$(sed -n 's/.*peak GPU memory \([0-9.]*\) MiB.*/\1/p' "$RUNNER_TEMP/run.log")
+          if ! awk -v peak="$peak" 'BEGIN { exit !(peak > 0) }'; then
+            echo "::error::the log reports no non-zero peak GPU memory (got '$peak')"
+            exit 1
+          fi
+
+          python -c "
+          import sys
+          import numpy as np, xarray as xr
+          out = xr.open_zarr(sys.argv[1])
+          print(out)
+          for name in ('t2m', 'tp', 'z'):
+              assert np.isfinite(out[name].values).all(), f'{name} has non-finite values'
+          " "$RUNNER_TEMP/out.zarr"

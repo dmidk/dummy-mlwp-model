@@ -1,0 +1,21 @@
+# GPU runners for CI, started on demand on AWS by https://cirun.io/ and torn down when
+# the job finishes. The same setup as neural-lam's (mllam/neural-lam/.cirun.yml), except
+# for the instance type: that one is a g4ad, whose GPU is an AMD Radeon, which a CUDA
+# build of torch cannot see. This one has to be NVIDIA, or DEVICE=cuda exits 4.
+runners:
+  - name: "aws-runner"
+    # Cloud Provider: AWS
+    cloud: "aws"
+    # https://aws.amazon.com/ec2/instance-types/g4/ — one NVIDIA T4, the cheapest NVIDIA
+    # instance this AMI runs on. The smoke test needs only a few MiB of GPU memory.
+    instance_type: "g4dn.xlarge"
+    # Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04), Frankfurt region with
+    # 200GB root volume. The same AMI as neural-lam's; it supports G4dn.
+    machine_image: "ami-0266e0ac094b2f8b9"
+    # use Frankfurt region
+    region: "eu-central-1"
+    preemptible: false
+    # The label CI's gpu job asks for in runs-on (with a per-run suffix that cirun
+    # ignores when matching), so that cirun creates this runner for it.
+    labels:
+      - "cirun-aws-runner"

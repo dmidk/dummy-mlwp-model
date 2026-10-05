@@ -110,9 +110,12 @@ patched environment and check the resulting store and exit code. When adding a f
 add both a unit test for the logic and an end-to-end test for the behaviour a pipeline
 would actually see.
 
-**The GPU path is the one thing tests cannot cover.** Changes to `model.py` need a
-manual check on a GPU host — see the README's GPU section, and confirm the log reports
-a device name and non-zero peak memory.
+**The GPU path is the one thing the test suite cannot cover.** CI's `gpu` job covers it
+instead: it makes the end-to-end smoke-test run with `DEVICE=cuda` on an NVIDIA GPU that
+cirun.io starts on AWS (`.cirun.yml`), with the image's Python and the `cu124` torch, and
+checks that the log reports a CUDA device and non-zero peak memory. It runs the code, not
+the image, so a change to the Dockerfile's CUDA setup still needs a manual check on a GPU
+host — see the README's GPU section.
 
 ## Things that have already been decided
 
@@ -151,8 +154,15 @@ Do not revisit these without being asked:
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.
 - **The container image requires a GPU by default** (`ENV DEVICE=cuda` in the
   Dockerfile): without GPU access it exits 4. The Python default stays `auto` for local
-  runs. CI has no GPU, so every smoke-test run that starts the model passes `DEVICE`
-  explicitly (`cpu`, or `cuda` for the exit-4 check) — keep that when adding one.
+  runs. The GitHub-hosted runners have no GPU, so every smoke-test run that starts the
+  model passes `DEVICE` explicitly (`cpu`, or `cuda` for the exit-4 check) — keep that
+  when adding one.
+- **Only the end-to-end run goes to the GPU runner.** Lint, the test suite and the image
+  build stay on GitHub-hosted runners. The `gpu` job pays for an AWS instance, so it
+  runs only after the `test` job passes, and never for a PR from a fork, whose code
+  would run on that instance. The instance must have an NVIDIA GPU (`g4dn`):
+  neural-lam's `.cirun.yml`, which ours copies, uses a `g4ad`, whose GPU is AMD and
+  invisible to CUDA torch.
 - The container's CUDA base is amd64-only; there is no arm64 image.
 - **Images are pushed to `ghcr.io` only for version tags.** `vX.Y.Z` publishes `X.Y.Z`,
   `X.Y` and `latest`; a PEP 440 pre-, post- or dev release tag publishes only its own
@@ -171,9 +181,10 @@ Do not revisit these without being asked:
 ## Pull requests
 
 CI runs the test suite on Python 3.11 and 3.12 with CPU-only torch, plus lint and an
-end-to-end smoke test. The image workflow builds and smoke-tests the image on PRs and
-pushes to `main`, but only when a path that goes into the image changed (the `paths`
-list in `publish-image.yml` — extend it if you add one); it pushes to `ghcr.io` only for
-version tags. Both workflows check out with `fetch-depth: 0`, because `hatch-vcs` needs
+end-to-end smoke test, and once those pass, the same end-to-end run on a GPU (the `gpu`
+job; skipped for PRs from forks). The image workflow builds and smoke-tests the image on
+PRs and pushes to `main`, but only when a path that goes into the image changed (the
+`paths` list in `publish-image.yml` — extend it if you add one); it pushes to `ghcr.io`
+only for version tags. Both workflows check out with `fetch-depth: 0`, because `hatch-vcs` needs
 the tags — if you touch the workflows, keep that. Likewise `.dockerignore` must only
 exclude paths git ignores, or the image's version gets a dirty-tree date stamp.
