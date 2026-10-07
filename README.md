@@ -49,8 +49,12 @@ OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa
 ```
 
 On input the spec is an assertion: the variable must exist with exactly those dimensions,
-and a referenced level coordinate must match `LEVEL_COORDS` value for value. On output it
-is a construction instruction — `units` is written to the variable's attributes.
+and a referenced level coordinate must match `LEVEL_COORDS` value for value. When `units`
+is given, the variable's `units` attribute must equal it exactly, compared as a plain
+string with no unit parsing or normalisation: `u10:m/s` fails against a store that says
+`m s-1`, and a variable with no `units` attribute fails any declared units. Leave the
+units off an input entry to skip the check. On output the spec is a construction
+instruction — `units` is written to the variable's attributes.
 
 ### Forecast horizon
 
