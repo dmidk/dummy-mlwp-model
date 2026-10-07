@@ -156,8 +156,11 @@ docker run --rm --gpus all \
 ```
 
 Prebuilt images are published to `ghcr.io/dmidk/dummy-mlwp-model` for version tags only
-(see [Versioning](#versioning)). Pin a release, e.g. `:0.1.0` or `:0.1`; `:latest` is the
-newest final release.
+(see [Versioning](#versioning)). The examples use `:latest` for brevity; in pipelines, pin
+an exact version such as `:0.1.0`, so a new release cannot change their behaviour
+unexpectedly. `:latest` is the most recently published final release. Docker does not
+update an image it has already downloaded, so with `:latest`, run `docker pull` (or
+`docker run --pull always`) to pick up a new release.
 
 To confirm the GPU is genuinely in use, look for the log line reporting the device name
 and a non-zero peak GPU memory, and check that raising `MODEL_HIDDEN_CHANNELS` increases
@@ -351,8 +354,13 @@ and the container tag all follow.
 Pushing a version tag is also the only thing that publishes an image:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
 ```
+
+Make every release tag annotated (`-a`), as the release candidates are. When a final
+tag and an RC tag point at the same commit, `git describe` prefers an annotated tag over
+a lightweight one, so a lightweight `v0.1.0` would build as the RC's version and the
+publish job's version check would stop the release.
 
 | Tag | Image tags |
 | --- | --- |
