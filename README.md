@@ -346,8 +346,12 @@ already the default for the side with no credentials:
 Google Cloud Storage works the same way through `gs://` URIs, with
 `GOOGLE_APPLICATION_CREDENTIALS` or `DST_STORAGE_OPTIONS='{"project":"..."}'`.
 
-The resolved options for each side are logged at startup, with any key, secret, token
-or password value masked, so you can confirm which account and host a run used.
+The resolved options for each side are logged at startup, so you can confirm which
+account and host a run used. Any value whose name contains `key`, `secret`, `token`,
+`password`, `passwd`, `passphrase`, `credential`, `auth` or `connection_string` is
+masked as `***` at any depth, including inside `client_kwargs`, `config_kwargs` or a
+service-account object in `*_STORAGE_OPTIONS`, as is the password in a URL such as
+`https://user:pass@proxy`. Profile names, regions and endpoint hosts stay visible.
 
 ## Versioning
 
