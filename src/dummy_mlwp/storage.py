@@ -43,7 +43,10 @@ _AMBIENT_CREDENTIAL_VARS = (
 )
 
 #: fsspec option names that carry a credential.
-_CREDENTIAL_OPTIONS = ("profile", "key", "secret", "token")
+_CREDENTIAL_OPTIONS = ("profile", "key", "secret", "token", "username", "password")
+
+#: Credential names s3fs also accepts inside ``client_kwargs``.
+_CLIENT_CREDENTIAL_KWARGS = ("aws_access_key_id", "aws_secret_access_key", "aws_session_token")
 
 #: Substrings that mark an option name as secret when logging, matched case-insensitively
 #: at any nesting depth. Deliberately broad: masking a harmless value costs a little
@@ -209,6 +212,11 @@ def _has_credentials(env: Mapping[str, str], side: str, options: Mapping[str, An
         False means the request should go out unsigned.
     """
     if any(options.get(name) for name in _CREDENTIAL_OPTIONS):
+        return True
+    client_kwargs = options.get("client_kwargs")
+    if isinstance(client_kwargs, Mapping) and any(
+        client_kwargs.get(name) for name in _CLIENT_CREDENTIAL_KWARGS
+    ):
         return True
     if _get(env, side, "AWS_PROFILE"):
         return True

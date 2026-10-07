@@ -105,6 +105,24 @@ def test_credentials_in_the_json_escape_hatch_turn_signing_on():
     assert storage_options(env, S3, "SRC")["anon"] is False
 
 
+def test_s3fs_credential_aliases_turn_signing_on():
+    env = {"SRC_STORAGE_OPTIONS": '{"username": "AKIA...", "password": "shh"}'}
+    assert storage_options(env, S3, "SRC")["anon"] is False
+
+
+@pytest.mark.parametrize(
+    "name", ["aws_access_key_id", "aws_secret_access_key", "aws_session_token"]
+)
+def test_credentials_inside_client_kwargs_turn_signing_on(name):
+    env = {"SRC_STORAGE_OPTIONS": json.dumps({"client_kwargs": {name: "shh"}})}
+    assert storage_options(env, S3, "SRC")["anon"] is False
+
+
+def test_client_kwargs_without_credentials_stay_anonymous():
+    env = {"SRC_STORAGE_OPTIONS": '{"client_kwargs": {"region_name": "eu-north-1"}}'}
+    assert storage_options(env, S3, "SRC")["anon"] is True
+
+
 def test_explicit_anon_wins_over_credentials():
     env = {"SRC_AWS_PROFILE": "reader", "SRC_S3_ANON": "true"}
     assert storage_options(env, S3, "SRC")["anon"] is True
