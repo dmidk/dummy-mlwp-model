@@ -275,8 +275,6 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
                     f"variable {spec.name!r} has no 'units' attribute but INPUT_VARIABLES "
                     f"declares units {spec.units!r}"
                 )
-            # isinstance first: a non-string attribute never matches, and comparing an
-            # array-valued attribute with == would not give a single truth value.
             elif not (isinstance(actual_units, str) and actual_units == spec.units):
                 problems.append(
                     f"variable {spec.name!r} has units {actual_units!r} but INPUT_VARIABLES "
