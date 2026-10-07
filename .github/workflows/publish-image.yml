@@ -91,11 +91,6 @@ jobs:
           load: true
           tags: ${{ env.LOCAL_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
-          # No cache-from/cache-to: the GitHub Actions cache is slower than building. A
-          # from-scratch build takes about 2 minutes (torch installs in about 1); reading
-          # the ~4.5 GB of cached layers back takes about as long, and writing them after
-          # a change to the base image or the dependencies took 7-9 minutes. The repo's
-          # 10 GB cache limit also meant PR builds evicted main's cache.
           provenance: false
 
       - name: Smoke test the image
