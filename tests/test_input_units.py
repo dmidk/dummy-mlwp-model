@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from dummy_mlwp.__main__ import main
 from dummy_mlwp.config import Config
 from dummy_mlwp.errors import InputError
 from dummy_mlwp.grid import detect_coords
 from dummy_mlwp.inputs import _validate_variables, validate_input
+from helpers import invoke
 
 LEVELS = "isobaricInhPa:850/500/250"
 
@@ -23,13 +23,6 @@ MINIMAL = {
 def problems_for(ds, input_variables: str) -> list[str]:
     config = Config.from_env(MINIMAL | {"INPUT_VARIABLES": input_variables})
     return _validate_variables(ds, config, detect_coords(ds))
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 # --- unit ----------------------------------------------------------------------------
