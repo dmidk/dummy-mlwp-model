@@ -85,5 +85,5 @@ ENTRYPOINT ["python", "-m", "dummy_mlwp"]
 
 LABEL org.opencontainers.image.title="dummy-mlwp-model" \
       org.opencontainers.image.description="Dummy deep-learning weather model: zarr in, zarr out" \
-      org.opencontainers.image.source="https://github.com/OWNER/dummy-mlwp-model" \
+      org.opencontainers.image.source="https://github.com/dmidk/dummy-mlwp-model" \
       org.opencontainers.image.licenses="MIT"

@@ -1,9 +1,10 @@
 name: CI
 
+# Push only on main: a branch with an open PR is covered by the pull_request run, and
+# pushing on every branch as well ran each commit twice. Branches without a PR get no CI.
 on:
   push:
-    branches: ["**"]
-    tags-ignore: ["**"]
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -19,39 +20,44 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # hatch-vcs reads the version from the git tag, so the full history and
           # tags have to be present or the build reports a bogus version.
           fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+      - name: Install uv and Python ${{ matrix.python-version }}
+        # Creates .venv and puts it on PATH for every later step. The cache is keyed on
+        # pyproject.toml; there is deliberately no uv.lock (see the Install step).
+        # Exact version: since v8, setup-uv publishes no floating major tags.
+        uses: astral-sh/setup-uv@v10.2.0
         with:
+          python-version: ${{ matrix.python-version }}
+          activate-environment: true
           enable-cache: true
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
 
       - name: Install
         # CPU-only torch keeps this job fast and off the CUDA stack; the test suite
         # runs with DEVICE=cpu, so it covers everything except the GPU path itself.
         run: |
-          uv venv --python ${{ matrix.python-version }}
           uv pip install --index-url https://download.pytorch.org/whl/cpu torch
           uv pip install -e ".[dev]"
 
+      # The steps below call the venv's tools directly, never through `uv run`: in a
+      # directory with a pyproject.toml, `uv run` locks and syncs the project from PyPI,
+      # which would swap the CPU-only torch above for the multi-GB CUDA build.
+
       - name: Lint
         run: |
-          uv run ruff check .
-          uv run ruff format --check .
+          ruff check .
+          ruff format --check .
 
       - name: Test
-        run: uv run pytest -q
+        run: pytest -q
 
       - name: Smoke test the CLI end to end
         run: |
-          uv run python scripts/make_test_input.py /tmp/in.zarr \
+          python scripts/make_test_input.py /tmp/in.zarr \
             --kind projected --levels 850 500 250
           INPUT_ZARR=/tmp/in.zarr \
           OUTPUT_ZARR=/tmp/out.zarr \
@@ -60,5 +66,5 @@ jobs:
           OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa \
           N_FORECAST_STEPS=8 \
           DEVICE=cpu \
-          uv run python -m dummy_mlwp
-          uv run python -c "import xarray as xr; print(xr.open_zarr('/tmp/out.zarr'))"
+          python -m dummy_mlwp
+          python -c "import xarray as xr; print(xr.open_zarr('/tmp/out.zarr'))"
