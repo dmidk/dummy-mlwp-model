@@ -6,16 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from dummy_mlwp.__main__ import main
+from helpers import invoke
 
 LEVELS = "isobaricInhPa:850/500/250"
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 def open_output(env: dict[str, str]) -> xr.Dataset:

@@ -227,10 +227,14 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
 
 
 def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> list[str]:
-    """Check each declared input variable exists with the implied dimensions.
+    """Check each declared input variable exists with the implied dimensions and units.
 
     Dimension *order* is not checked — a store may hold ``(x, time, y)`` and it is
     transposed later — but the set of dimensions must match exactly.
+
+    Declared units are compared with the variable's ``units`` attribute as plain
+    strings: no unit parsing or normalisation, so ``m s-1`` does not match ``m/s``. A
+    variable declared without units has no units check.
 
     Parameters
     ----------
@@ -244,7 +248,8 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
     Returns
     -------
     list of str
-        One message per missing variable or dimension mismatch.
+        One message per missing variable, dimension mismatch or units mismatch. A
+        variable with both wrong dimensions and wrong units gets one of each.
     """
     problems: list[str] = []
     for spec in config.input_variables:
@@ -262,6 +267,19 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
                 f"variable {spec.name!r} has dimensions {tuple(map(str, ds[spec.name].dims))} "
                 f"but {spec} implies {spec.dims(coords.time, coords.y, coords.x)}"
             )
+
+        if spec.units is not None:
+            actual_units = ds[spec.name].attrs.get("units")
+            if actual_units is None:
+                problems.append(
+                    f"variable {spec.name!r} has no 'units' attribute but INPUT_VARIABLES "
+                    f"declares units {spec.units!r}"
+                )
+            elif not (isinstance(actual_units, str) and actual_units == spec.units):
+                problems.append(
+                    f"variable {spec.name!r} has units {actual_units!r} but INPUT_VARIABLES "
+                    f"declares units {spec.units!r} (compared as exact strings, no conversion)"
+                )
     return problems
 
 
