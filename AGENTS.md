@@ -116,10 +116,17 @@ Do not revisit these without being asked:
 - The output store's zarr format matches the input's unless `ZARR_FORMAT` says otherwise.
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.
 - The container's CUDA base is amd64-only; there is no arm64 image.
+- **Images are pushed to `ghcr.io` only for version tags.** `vX.Y.Z` publishes `X.Y.Z`,
+  `X.Y` and `latest`; a PEP 440 pre-, post- or dev release tag publishes only its own
+  version and never moves `latest`. Pushes to `main` and PRs build and smoke-test the
+  image without pushing it. The image is smoke-tested *before* it is pushed.
 
 ## Pull requests
 
 CI runs the test suite on Python 3.11 and 3.12 with CPU-only torch, plus lint and an
-end-to-end smoke test. The image workflow builds on PRs but only pushes to `ghcr.io`
-from the default branch and `v*` tags. Both workflows check out with `fetch-depth: 0`,
-because `hatch-vcs` needs the tags — if you touch the workflows, keep that.
+end-to-end smoke test. The image workflow builds and smoke-tests the image on PRs and
+pushes to `main`, but only when a path that goes into the image changed (the `paths`
+list in `publish-image.yml` — extend it if you add one); it pushes to `ghcr.io` only for
+version tags. Both workflows check out with `fetch-depth: 0`, because `hatch-vcs` needs
+the tags — if you touch the workflows, keep that. Likewise `.dockerignore` must only
+exclude paths git ignores, or the image's version gets a dirty-tree date stamp.
