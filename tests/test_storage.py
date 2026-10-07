@@ -371,7 +371,7 @@ class _OptionsMemoryFileSystem(fsspec.implementations.memory.MemoryFileSystem):
 
 def test_nested_destination_secret_stays_out_of_the_startup_log(monkeypatch, base_env, capsys):
     """Drive the whole application, and read the log a pipeline would actually see."""
-    from dummy_mlwp.__main__ import main
+    from helpers import invoke
 
     fsspec.register_implementation("optsmem", _OptionsMemoryFileSystem, clobber=True)
     storage = {
@@ -385,11 +385,7 @@ def test_nested_destination_secret_stays_out_of_the_startup_log(monkeypatch, bas
         "DST_STORAGE_OPTIONS": json.dumps(storage),
         "N_FORECAST_STEPS": "1",
     }
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-
-    assert main() == 0
+    assert invoke(monkeypatch, env) == 0
 
     stderr = capsys.readouterr().err
     line = next(line for line in stderr.splitlines() if "DST storage options" in line)
