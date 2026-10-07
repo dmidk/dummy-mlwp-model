@@ -96,6 +96,13 @@ def test_projected_run_keeps_the_crs(monkeypatch, base_env):
     assert out.t2m.attrs["grid_mapping"] == "crs"
 
 
+def test_output_attributes_record_the_version_and_the_input(monkeypatch, base_env):
+    assert invoke(monkeypatch, base_env) == 0
+    out = open_output(base_env)
+    assert out.attrs["source"].startswith("dummy-mlwp-model ")
+    assert out.attrs["input_zarr"] == base_env["INPUT_ZARR"]
+
+
 def test_transposed_input_dimensions_are_accepted(monkeypatch, tmp_path, make_input):
     source = make_input()
     ds = xr.open_zarr(source).transpose("x", "time", "y")
