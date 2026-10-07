@@ -152,11 +152,15 @@ docker run --rm --gpus all \
   -e N_FORECAST_STEPS=8 \
   -e DEVICE=cuda \
   -e MODEL_HIDDEN_CHANNELS=256 \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
-Prebuilt images are published to `ghcr.io/OWNER/dummy-mlwp-model` on every push to the
-default branch and every `v*` tag.
+Prebuilt images are published to `ghcr.io/dmidk/dummy-mlwp-model` for version tags only
+(see [Versioning](#versioning)). The examples use `:latest` for brevity; in pipelines, pin
+an exact version such as `:0.1.0`, so a new release cannot change their behaviour
+unexpectedly. `:latest` is the most recently published final release. Docker does not
+update an image it has already downloaded, so with `:latest`, run `docker pull` (or
+`docker run --pull always`) to pick up a new release.
 
 To confirm the GPU is genuinely in use, look for the log line reporting the device name
 and a non-zero peak GPU memory, and check that raising `MODEL_HIDDEN_CHANNELS` increases
@@ -265,7 +269,7 @@ docker run --rm --gpus all \
   -e OUTPUT_VARIABLES=t2m:K,tp:mm \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 The image runs as uid 1000 with home `/home/model`, which is why the mount goes there —
@@ -320,7 +324,7 @@ docker run --rm --gpus all \
   -e N_INPUT_TIMESTEPS=-2 \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 Two profile names is the whole configuration: each side resolves its own host, region
@@ -346,6 +350,27 @@ or password value masked, so you can confirm which account and host a run used.
 The version is derived from the git tag by `hatch-vcs`. Tag a release as `v1.2.3` and
 the wheel, the `dummy_mlwp.__version__` attribute, the output store's `source` attribute,
 and the container tag all follow.
+
+Pushing a version tag is also the only thing that publishes an image:
+
+```sh
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+```
+
+Make every release tag annotated (`-a`), as the release candidates are. When a final
+tag and an RC tag point at the same commit, `git describe` prefers an annotated tag over
+a lightweight one, so a lightweight `v0.1.0` would build as the RC's version and the
+publish job's version check would stop the release.
+
+| Tag | Image tags |
+| --- | --- |
+| `v0.1.0` | `0.1.0`, `0.1`, `latest` |
+| `v0.2.0rc1` (any PEP 440 pre-, post- or dev release) | `0.2.0rc1` only; `latest` does not move |
+
+A pre-release tag is the way to get a test image onto a GPU host before a release.
+Pull requests and pushes to `main` build and smoke-test the image, but do not push it,
+and only when something that goes into the image changed. The publish job checks that
+the image's version matches the tag before pushing anything.
 
 ## Development
 
