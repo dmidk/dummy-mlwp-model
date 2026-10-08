@@ -32,11 +32,11 @@ src/dummy_mlwp/
   varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
   grid.py       cf-xarray coordinate discovery + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
-  storage.py    per-side (SRC_/DST_) fsspec options for the two stores
+  storage.py    per-side (SRC_/DST_) fsspec options; storage failures -> StorageError
   inputs.py     open the store, assert it matches the config, pack channels
   model.py      DummyNet, device selection, forward pass, rollout
   outputs.py    assemble the output dataset, write zarr
-  errors.py     ConfigError / InputError / DeviceError, each with an exit code
+  errors.py     ConfigError / InputError / DeviceError / StorageError, each with an exit code
 scripts/
   make_test_input.py   synthetic input generator, reused by the test fixtures
 tests/
@@ -52,6 +52,10 @@ tests/
 - **Line length 100.** Run `ruff format .` rather than hand-wrapping.
 - **Versioning is `hatch-vcs` from the git tag.** Never hardcode a version; never edit
   `src/dummy_mlwp/_version.py`, which is generated.
+- **Store I/O maps its failures to `StorageError` (exit 5).** Wrap any new read or write
+  of a store in `except storage_exceptions() as exc: raise storage_error(...) from exc`
+  (both in `storage.py`). Never widen that to bare `Exception`: a programming error must
+  stay exit 1 with its traceback. A missing *input* store stays an `InputError` (exit 3).
 - Prefer the existing helpers over new ones: `channel_layout` is the single source of
   truth for channel ordering, and `scripts/make_test_input.py:build` is the single
   synthetic-data generator (the test fixtures import it).
@@ -68,9 +72,20 @@ declaration order, expanding levels. `inputs.stack_channels` packs with it and
 `outputs.build_output_dataset` unpacks with it. If you change one, change both — a
 silent drift here produces plausible-looking output with variables swapped.
 
-**Validation is collected, not raised eagerly.** `inputs.validate_input` gathers every
-problem and raises once, so a misconfigured pipeline reports all its problems in one
-run. New checks should append to the `problems` list, not raise on the spot.
+**Validation is collected, not raised eagerly.** Both layers gather every problem and
+raise once, formatted with `errors.format_problems`, so a misconfigured pipeline reports
+all its problems in one run:
+
+- `inputs.validate_input` — new checks append to its `problems` list, not raise on the
+  spot.
+- `Config.from_env` — the parse helpers (`_get_int`, `varspec.parse_*`,
+  `storage.storage_options`, ...) still raise `ConfigError`; `from_env` runs each through
+  `_attempt`, which records the message and returns `None` as a placeholder. A new
+  variable goes through `_attempt` too, and a cross-check appends to `problems` directly.
+  A check that depends on a value that failed to parse is skipped (`if x is not None`),
+  so one mistake is reported once: a broken `LEVEL_COORDS` makes `parse_var_specs` skip
+  only its "is this `@` reference declared?" check, rather than flagging every reference.
+  A lone problem is raised as its bare message, without the headline.
 
 ## Testing
 

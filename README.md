@@ -133,10 +133,44 @@ model does — which is the property a scheduler test actually cares about.
 | 2 | Configuration error — a missing or malformed environment variable |
 | 3 | Input error — the store does not match the configured expectations |
 | 4 | Device error — a GPU was requested but is unusable |
+| 5 | Storage error — a store could not be reached, read or written: missing or rejected credentials, access denied, an unreachable endpoint, a read-only destination |
 | 1 | Anything unexpected (traceback logged) |
 
-Input validation collects *every* problem before failing, so one run of a misconfigured
-pipeline reports all of them rather than one per debugging cycle.
+An input store that does not exist — no such path, bucket or key — is an input error
+(3), not a storage error: the backend answered, and `INPUT_ZARR` points at nothing. (S3
+answers "access denied" rather than "not found" when the caller may not list the bucket,
+so there a missing store is a 5.) On the output side nothing is expected to exist
+beforehand, so any failure to write is a 5. A storage error's message names the side, the
+URI and the underlying error, and says what to check — for S3, whether that side was
+anonymous and which endpoint it used.
+
+Configuration parsing and input validation both collect *every* problem before failing,
+so one run of a misconfigured pipeline reports all of them rather than one per debugging
+cycle.
+
+## Logs
+
+Logs go to stderr at `LOG_LEVEL`. With no command line and no config file, the log is
+the only record of what a run actually used, so startup records two things at INFO:
+
+- **the version**, as the very first line — before the configuration is parsed, so even
+  a run that exits 2 says which version failed;
+- **the effective configuration**, as soon as it parses: every setting, defaults
+  included, one line each, labelled with the environment variable that controls it.
+
+```
+INFO | __main__ - Starting dummy-mlwp-model 0.3.1
+INFO | __main__ - Effective configuration (defaults included):
+INFO | __main__ -   INPUT_ZARR            = s3://analysis/hres.zarr
+INFO | __main__ -   INPUT_VARIABLES       = t2m,u10,v10,t:K@isobaricInhPa
+INFO | __main__ -   LEVEL_COORDS          = isobaricInhPa:850/500/250
+INFO | __main__ -   N_INPUT_TIMESTEPS     = unset (all)
+INFO | __main__ -   N_FORECAST_STEPS      = 8
+...
+```
+
+The storage options are not repeated there; they are logged just before it, with
+credentials masked (see [Remote stores](#remote-stores)).
 
 ## Running it
 
@@ -198,7 +232,8 @@ uv pip install "dummy-mlwp-model[remote]"
 is the common case for a test rig, and defaulting to signed requests turns that into a
 confusing `NoCredentialsError`. Naming a profile, supplying keys, or running under an
 IAM role (ECS/EKS/EC2) all count as credentials and switch signing back on. The startup
-log says which mode each side ended up in.
+log says which mode each side ended up in, and if a store cannot be reached the run exits
+5 with a message that says so too.
 
 So a public source bucket needs no configuration at all:
 

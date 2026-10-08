@@ -10,8 +10,10 @@ import os
 import sys
 import time
 
+import numpy as np
 from loguru import logger
 
+from . import __version__
 from .config import Config
 from .envvars import warn_unknown_env_vars
 from .errors import DummyMLWPError
@@ -58,6 +60,120 @@ def configure_logging(level: str) -> None:
         logger.warning(f"LOG_LEVEL={level!r} is not a known level; using INFO")
 
 
+def describe_config(config: Config) -> dict[str, str]:
+    """Render the effective configuration for the startup log.
+
+    Parameters
+    ----------
+    config : Config
+        The parsed run configuration.
+
+    Returns
+    -------
+    dict of str to str
+        One entry per setting the run will use, defaults included, keyed by the
+        environment variable that controls it, in the order the README documents them.
+        Values are written in the grammar the variables accept (variable specs and
+        level coordinates as declared, durations in ISO 8601), so a log line maps
+        straight back to the deployment. An optional setting left unset reads
+        ``unset (...)``, naming what happens instead.
+
+    Notes
+    -----
+    The storage options are deliberately left out. They are assembled from many
+    variables rather than one, and :func:`storage.storage_options` has already logged
+    them, credentials masked, while the configuration was parsed. One place rendering
+    them means one place that has to get the redaction right.
+    """
+    timestep = config.forecast_timestep
+    return {
+        "INPUT_ZARR": config.input_zarr,
+        "OUTPUT_ZARR": config.output_zarr,
+        "INPUT_VARIABLES": ",".join(str(spec) for spec in config.input_variables),
+        "OUTPUT_VARIABLES": ",".join(str(spec) for spec in config.output_variables),
+        "LEVEL_COORDS": _render_level_coords(config.level_coords),
+        "N_INPUT_TIMESTEPS": _or_unset(config.n_input_timesteps, "all"),
+        "N_FORECAST_STEPS": str(config.n_forecast_steps),
+        "FORECAST_TIMESTEP": _or_unset(
+            None if timestep is None else timestep.isoformat(), "inferred from input"
+        ),
+        "TIME_COORD": _or_unset(config.time_coord, "auto-detect"),
+        "X_COORD": _or_unset(config.x_coord, "auto-detect"),
+        "Y_COORD": _or_unset(config.y_coord, "auto-detect"),
+        "OUTPUT_MODE": config.output_mode,
+        "RANDOM_SEED": str(config.random_seed),
+        "CONSTANT_VALUE": str(config.constant_value),
+        "DEVICE": config.device,
+        "MODEL_HIDDEN_CHANNELS": str(config.model_hidden_channels),
+        "MODEL_LAYERS": str(config.model_layers),
+        "ZARR_FORMAT": config.zarr_format,
+        "LOG_LEVEL": config.log_level,
+    }
+
+
+def _render_level_coords(level_coords: dict[str, np.ndarray]) -> str:
+    """Write level coordinates back in the ``LEVEL_COORDS`` grammar.
+
+    Parameters
+    ----------
+    level_coords : dict of str to numpy.ndarray
+        Declared level coordinates, keyed by name.
+
+    Returns
+    -------
+    str
+        ``name:v1/v2,name2:v1`` in declaration order, e.g.
+        ``'isobaricInhPa:850/500/250'``, or ``'unset (none)'`` when none are declared.
+    """
+    if not level_coords:
+        return "unset (none)"
+    return ",".join(
+        f"{name}:{'/'.join(str(v) for v in values.tolist())}"
+        for name, values in level_coords.items()
+    )
+
+
+def _or_unset(value: object, meaning: str) -> str:
+    """Render an optional setting, spelling out what an unset one means.
+
+    Parameters
+    ----------
+    value : object
+        The setting's value, or ``None`` when it was left unset.
+    meaning : str
+        What the run does instead when the setting is unset.
+
+    Returns
+    -------
+    str
+        ``str(value)``, or ``'unset (<meaning>)'`` for ``None``. The parenthesised form
+        cannot be mistaken for a value someone actually configured.
+    """
+    return f"unset ({meaning})" if value is None else str(value)
+
+
+def log_config(config: Config) -> None:
+    """Log the effective configuration at INFO, one setting per line.
+
+    Parameters
+    ----------
+    config : Config
+        The parsed run configuration, rendered by :func:`describe_config`.
+
+    Notes
+    -----
+    One record per setting rather than a single multi-line message: container log
+    collectors split on newlines, so the continuation lines of one message would lose
+    their timestamp and level, while separate records each keep theirs and stay
+    greppable by variable name.
+    """
+    settings = describe_config(config)
+    width = max(len(name) for name in settings)
+    logger.info("Effective configuration (defaults included):")
+    for name, value in settings.items():
+        logger.info(f"  {name:<{width}} = {value}")
+
+
 def run(config: Config) -> None:
     """Execute one forecast, start to finish.
 
@@ -74,6 +190,8 @@ def run(config: Config) -> None:
         If the requested device is unusable.
     ConfigError
         If the forecast resolution cannot be determined from the input.
+    StorageError
+        If the input store cannot be read or the output store cannot be written.
     """
     started = time.perf_counter()
 
@@ -154,14 +272,21 @@ def main() -> int:
     -------
     int
         0 on success; 2 for a configuration error, 3 for an input error, 4 for a
-        device error, and 1 for anything unexpected, whose traceback is logged.
+        device error, 5 for a storage error (a store could not be reached, read or
+        written), and 1 for anything unexpected, whose traceback is logged.
 
     Notes
     -----
     The configuration is parsed before any store is touched, so a bad deployment
     fails in the first second rather than after a long read.
+
+    With no command line and no config file, the log is the only record of what a run
+    used: the version is logged first, before parsing, so even a run that fails on its
+    configuration says which version failed, and the effective configuration follows
+    as soon as it parses.
     """
     configure_logging(os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO")
+    logger.info(f"Starting dummy-mlwp-model {__version__}")
     warn_unknown_env_vars()
     try:
         config = Config.from_env()
@@ -170,6 +295,7 @@ def main() -> int:
         return exc.exit_code
 
     configure_logging(config.log_level)
+    log_config(config)
     try:
         run(config)
     except DummyMLWPError as exc:
