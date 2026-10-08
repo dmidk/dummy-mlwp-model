@@ -130,8 +130,9 @@ beforehand, so any failure to write is a 5. A storage error's message names the 
 URI and the underlying error, and says what to check — for S3, whether that side was
 anonymous and which endpoint it used.
 
-Input validation collects *every* problem before failing, so one run of a misconfigured
-pipeline reports all of them rather than one per debugging cycle.
+Configuration parsing and input validation both collect *every* problem before failing,
+so one run of a misconfigured pipeline reports all of them rather than one per debugging
+cycle.
 
 ## Running it
 

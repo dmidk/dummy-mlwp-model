@@ -225,7 +225,7 @@ def _parse_level_values(tokens: list[str], name: str, source: str) -> np.ndarray
 
 def parse_var_specs(
     text: str,
-    level_coords: dict[str, np.ndarray],
+    level_coords: dict[str, np.ndarray] | None,
     source: str,
 ) -> list[VarSpec]:
     """Parse a comma-separated list of variable specs.
@@ -234,8 +234,12 @@ def parse_var_specs(
     ----------
     text : str
         Entries in the form ``name[:units][@levelCoordName]``, comma-separated.
-    level_coords : dict of str to numpy.ndarray
-        Declared level coordinates, used to validate ``@`` references.
+    level_coords : dict of str to numpy.ndarray or None
+        Declared level coordinates, used to validate ``@`` references. ``None`` means
+        the declared set is unknown because LEVEL_COORDS itself failed to parse: the
+        rest of the grammar is still checked, but whether a ``@`` reference is declared
+        is not, since every reference would otherwise be flagged. Pass ``None`` only
+        once that failure has been recorded, so the specs returned never reach a run.
     source : str
         Environment variable name used in error messages.
 
@@ -248,7 +252,8 @@ def parse_var_specs(
     ------
     ConfigError
         If the list is empty, a name repeats, an entry is malformed, or a ``@``
-        reference names an undeclared level coordinate.
+        reference names an undeclared level coordinate (checked only when
+        ``level_coords`` is not ``None``).
     """
     specs: list[VarSpec] = []
     seen: set[str] = set()
@@ -263,15 +268,16 @@ def parse_var_specs(
     return specs
 
 
-def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> VarSpec:
+def _parse_one(entry: str, level_coords: dict[str, np.ndarray] | None, source: str) -> VarSpec:
     """Parse a single ``name[:units][@levelCoord]`` entry.
 
     Parameters
     ----------
     entry : str
         One comma-separated entry, already stripped.
-    level_coords : dict of str to numpy.ndarray
-        Declared level coordinates, used to validate a ``@`` reference.
+    level_coords : dict of str to numpy.ndarray or None
+        Declared level coordinates, used to validate a ``@`` reference. ``None`` skips
+        that check; see :func:`parse_var_specs`.
     source : str
         Environment variable name used in error messages.
 
@@ -290,7 +296,7 @@ def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> 
     level_coord: str | None = None
     if raw_level:
         level_coord = _check_name(raw_level, "level coordinate reference", source)
-        if level_coord not in level_coords:
+        if level_coords is not None and level_coord not in level_coords:
             known = ", ".join(sorted(level_coords)) or "(none declared)"
             raise ConfigError(
                 f"{source}: entry {entry!r} references level coordinate "

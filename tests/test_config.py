@@ -102,6 +102,107 @@ def test_rejects_bad_values(key, value, message):
         Config.from_env(MINIMAL | {key: value})
 
 
+# --- problems are collected, not raised one at a time --------------------------------
+
+
+def config_error(env: dict[str, str]) -> str:
+    with pytest.raises(ConfigError) as excinfo:
+        Config.from_env(env)
+    return str(excinfo.value)
+
+
+def test_every_bad_variable_is_reported_in_one_error():
+    env = {k: v for k, v in MINIMAL.items() if k != "OUTPUT_ZARR"} | {
+        "N_FORECAST_STEPS": "0",
+        "OUTPUT_MODE": "vibes",
+        "MODEL_LAYERS": "1",
+        "FORECAST_TIMESTEP": "soon",
+    }
+    message = config_error(env)
+    lines = message.splitlines()
+    assert lines[0] == "The environment configuration has 5 problems:"
+    assert len(lines) == 6
+    assert all(line.startswith("  - ") for line in lines[1:])
+    for expected in (
+        "N_FORECAST_STEPS must be -1",
+        "OUTPUT_MODE must be one of",
+        "MODEL_LAYERS must be >= 2",
+        "FORECAST_TIMESTEP must be an ISO 8601 duration",
+        "OUTPUT_ZARR is required",
+    ):
+        assert expected in message
+
+
+def test_a_single_problem_is_reported_as_its_bare_message():
+    message = config_error(MINIMAL | {"OUTPUT_MODE": "vibes"})
+    assert message == "OUTPUT_MODE must be one of random, persistence, constant, zeros, got 'vibes'"
+
+
+def test_an_unparseable_number_is_not_also_range_checked():
+    """'eight' is one problem, not 'must be an integer' plus an out-of-range complaint."""
+    message = config_error(MINIMAL | {"N_FORECAST_STEPS": "eight", "MODEL_LAYERS": "two"})
+    assert message.splitlines()[0] == "The environment configuration has 2 problems:"
+    assert "must be -1" not in message
+    assert "must be >= 2" not in message
+
+
+def test_broken_level_coords_do_not_flag_every_level_reference():
+    """Each @reference would otherwise be reported as undeclared, burying the real fault."""
+    message = config_error(
+        MINIMAL
+        | {
+            "LEVEL_COORDS": "isobaricInhPa:850/high",
+            "INPUT_VARIABLES": "t2m,t@isobaricInhPa",
+            "OUTPUT_VARIABLES": "z@isobaricInhPa",
+        }
+    )
+    assert message.startswith("LEVEL_COORDS: level coordinate 'isobaricInhPa' has a non-numeric")
+    assert "not declared" not in message
+
+
+def test_broken_level_coords_still_let_variable_grammar_be_checked():
+    message = config_error(
+        MINIMAL
+        | {
+            "LEVEL_COORDS": "isobaricInhPa:850/high",
+            "INPUT_VARIABLES": "t@isobaricInhPa,bad name",
+        }
+    )
+    assert message.splitlines()[0] == "The environment configuration has 2 problems:"
+    assert "LEVEL_COORDS: level coordinate 'isobaricInhPa'" in message
+    assert "INPUT_VARIABLES: variable name 'bad name' is not a valid name" in message
+    assert "not declared" not in message
+
+
+def test_undeclared_level_reference_is_still_reported_alongside_other_problems():
+    message = config_error(MINIMAL | {"OUTPUT_VARIABLES": "z@isobaricInhPa", "DEVICE": "tpu"})
+    assert "which is not declared in LEVEL_COORDS" in message
+    assert "DEVICE must be one of" in message
+
+
+def test_storage_option_problems_are_collected():
+    message = config_error(
+        MINIMAL
+        | {
+            "OUTPUT_ZARR": "s3://bucket/out.zarr",
+            "SRC_STORAGE_OPTIONS": "not json",
+            "DST_S3_ANON": "maybe",
+            "N_INPUT_TIMESTEPS": "0",
+        }
+    )
+    assert message.splitlines()[0] == "The environment configuration has 3 problems:"
+    assert "SRC_STORAGE_OPTIONS must be valid JSON" in message
+    assert "DST_S3_ANON must be a boolean" in message
+    assert "N_INPUT_TIMESTEPS must be a positive number" in message
+
+
+def test_storage_options_are_not_parsed_without_a_store_uri():
+    """The URI's scheme decides which options apply; a missing URI is the one problem."""
+    env = {k: v for k, v in MINIMAL.items() if k != "INPUT_ZARR"}
+    message = config_error(env | {"SRC_STORAGE_OPTIONS": "not json"})
+    assert message == "INPUT_ZARR is required but not set"
+
+
 def test_choices_are_case_insensitive():
     config = Config.from_env(MINIMAL | {"OUTPUT_MODE": "Persistence", "DEVICE": "CPU"})
     assert config.output_mode == "persistence"
