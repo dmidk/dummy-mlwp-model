@@ -49,8 +49,12 @@ OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa
 ```
 
 On input the spec is an assertion: the variable must exist with exactly those dimensions,
-and a referenced level coordinate must match `LEVEL_COORDS` value for value. On output it
-is a construction instruction — `units` is written to the variable's attributes.
+and a referenced level coordinate must match `LEVEL_COORDS` value for value. When `units`
+is given, the variable's `units` attribute must equal it exactly, compared as a plain
+string with no unit parsing or normalisation: `u10:m/s` fails against a store that says
+`m s-1`, and a variable with no `units` attribute fails any declared units. Leave the
+units off an input entry to skip the check. On output the spec is a construction
+instruction — `units` is written to the variable's attributes.
 
 ### Forecast horizon
 
@@ -115,10 +119,20 @@ model does — which is the property a scheduler test actually cares about.
 | 2 | Configuration error — a missing or malformed environment variable |
 | 3 | Input error — the store does not match the configured expectations |
 | 4 | Device error — a GPU was requested but is unusable |
+| 5 | Storage error — a store could not be reached, read or written: missing or rejected credentials, access denied, an unreachable endpoint, a read-only destination |
 | 1 | Anything unexpected (traceback logged) |
 
-Input validation collects *every* problem before failing, so one run of a misconfigured
-pipeline reports all of them rather than one per debugging cycle.
+An input store that does not exist — no such path, bucket or key — is an input error
+(3), not a storage error: the backend answered, and `INPUT_ZARR` points at nothing. (S3
+answers "access denied" rather than "not found" when the caller may not list the bucket,
+so there a missing store is a 5.) On the output side nothing is expected to exist
+beforehand, so any failure to write is a 5. A storage error's message names the side, the
+URI and the underlying error, and says what to check — for S3, whether that side was
+anonymous and which endpoint it used.
+
+Configuration parsing and input validation both collect *every* problem before failing,
+so one run of a misconfigured pipeline reports all of them rather than one per debugging
+cycle.
 
 ## Logs
 
@@ -176,11 +190,15 @@ docker run --rm --gpus all \
   -e N_FORECAST_STEPS=8 \
   -e DEVICE=cuda \
   -e MODEL_HIDDEN_CHANNELS=256 \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
-Prebuilt images are published to `ghcr.io/OWNER/dummy-mlwp-model` on every push to the
-default branch and every `v*` tag.
+Prebuilt images are published to `ghcr.io/dmidk/dummy-mlwp-model` for version tags only
+(see [Versioning](#versioning)). The examples use `:latest` for brevity; in pipelines, pin
+an exact version such as `:0.1.0`, so a new release cannot change their behaviour
+unexpectedly. `:latest` is the most recently published final release. Docker does not
+update an image it has already downloaded, so with `:latest`, run `docker pull` (or
+`docker run --pull always`) to pick up a new release.
 
 To confirm the GPU is genuinely in use, look for the log line reporting the device name
 and a non-zero peak GPU memory, and check that raising `MODEL_HIDDEN_CHANNELS` increases
@@ -200,7 +218,8 @@ uv pip install "dummy-mlwp-model[remote]"
 is the common case for a test rig, and defaulting to signed requests turns that into a
 confusing `NoCredentialsError`. Naming a profile, supplying keys, or running under an
 IAM role (ECS/EKS/EC2) all count as credentials and switch signing back on. The startup
-log says which mode each side ended up in.
+log says which mode each side ended up in, and if a store cannot be reached the run exits
+5 with a message that says so too.
 
 So a public source bucket needs no configuration at all:
 
@@ -289,7 +308,7 @@ docker run --rm --gpus all \
   -e OUTPUT_VARIABLES=t2m:K,tp:mm \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 The image runs as uid 1000 with home `/home/model`, which is why the mount goes there —
@@ -344,7 +363,7 @@ docker run --rm --gpus all \
   -e N_INPUT_TIMESTEPS=-2 \
   -e N_FORECAST_STEPS=12 \
   -e DEVICE=cuda \
-  ghcr.io/OWNER/dummy-mlwp-model:latest
+  ghcr.io/dmidk/dummy-mlwp-model:latest
 ```
 
 Two profile names is the whole configuration: each side resolves its own host, region
@@ -362,14 +381,39 @@ already the default for the side with no credentials:
 Google Cloud Storage works the same way through `gs://` URIs, with
 `GOOGLE_APPLICATION_CREDENTIALS` or `DST_STORAGE_OPTIONS='{"project":"..."}'`.
 
-The resolved options for each side are logged at startup, with any key, secret, token
-or password value masked, so you can confirm which account and host a run used.
+The resolved options for each side are logged at startup, so you can confirm which
+account and host a run used. Any value whose name contains `key`, `secret`, `token`,
+`password`, `passwd`, `passphrase`, `credential`, `auth` or `connection_string` is
+masked as `***` at any depth, including inside `client_kwargs`, `config_kwargs` or a
+service-account object in `*_STORAGE_OPTIONS`, as is the password in a URL such as
+`https://user:pass@proxy`. Profile names, regions and endpoint hosts stay visible.
 
 ## Versioning
 
 The version is derived from the git tag by `hatch-vcs`. Tag a release as `v1.2.3` and
 the wheel, the `dummy_mlwp.__version__` attribute, the output store's `source` attribute,
 and the container tag all follow.
+
+Pushing a version tag is also the only thing that publishes an image:
+
+```sh
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
+```
+
+Make every release tag annotated (`-a`), as the release candidates are. When a final
+tag and an RC tag point at the same commit, `git describe` prefers an annotated tag over
+a lightweight one, so a lightweight `v0.1.0` would build as the RC's version and the
+publish job's version check would stop the release.
+
+| Tag | Image tags |
+| --- | --- |
+| `v0.1.0` | `0.1.0`, `0.1`, `latest` |
+| `v0.2.0rc1` (any PEP 440 pre-, post- or dev release) | `0.2.0rc1` only; `latest` does not move |
+
+A pre-release tag is the way to get a test image onto a GPU host before a release.
+Pull requests and pushes to `main` build and smoke-test the image, but do not push it,
+and only when something that goes into the image changed. The publish job checks that
+the image's version matches the tag before pushing anything.
 
 ## Development
 
