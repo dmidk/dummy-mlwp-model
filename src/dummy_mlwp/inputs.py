@@ -15,7 +15,7 @@ from loguru import logger
 
 from .config import Config
 from .errors import InputError, format_problems
-from .grid import CoordNames, validate_grid
+from .grid import CoordNames, is_vertical_coord, validate_grid
 from .storage import storage_error, storage_exceptions
 from .timeaxis import validate_times
 from .varspec import VarSpec, channel_layout
@@ -101,6 +101,10 @@ def detect_zarr_format(uri: str, storage_options: dict[str, Any] | None = None) 
 
 def validate_input(ds: xr.Dataset, config: Config, coords: CoordNames) -> None:
     """Assert the input matches INPUT_VARIABLES, the grid assumption and the time axis.
+
+    This includes the CF metadata: level coordinates must identify themselves as
+    vertical, and any ``standard_name`` or ``units`` declared in INPUT_VARIABLES must
+    match the variable's attributes.
 
     Parameters
     ----------
@@ -216,8 +220,8 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
     Returns
     -------
     list of str
-        One message per level coordinate that is missing or whose values differ from
-        the declaration.
+        One message per level coordinate that is missing, is not identified as
+        vertical by its CF attributes, or whose values differ from the declaration.
     """
     problems: list[str] = []
     for name in sorted(_referenced_level_coords(config)):
@@ -227,6 +231,12 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
                 f"level coordinate {name!r} (from LEVEL_COORDS) is not present in the input"
             )
             continue
+        if not is_vertical_coord(ds, name):
+            problems.append(
+                f"level coordinate {name!r} is not identified as a vertical coordinate by "
+                "its CF attributes; it needs axis='Z', positive='up'/'down', a vertical "
+                "standard_name such as 'air_pressure' or 'height', or pressure units"
+            )
         actual = ds[name].values
         if actual.shape != expected.shape or not np.allclose(
             actual.astype("float64"), expected.astype("float64")
@@ -239,10 +249,12 @@ def _validate_level_coords(ds: xr.Dataset, config: Config) -> list[str]:
 
 
 def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> list[str]:
-    """Check each declared input variable exists with the implied dimensions and units.
+    """Check each declared input variable exists with the implied dimensions and attributes.
 
     Dimension *order* is not checked — a store may hold ``(x, time, y)`` and it is
-    transposed later — but the set of dimensions must match exactly.
+    transposed later — but the set of dimensions must match exactly. A declared
+    ``standard_name`` or ``units`` must match the variable's attribute exactly; units
+    are compared as strings, so ``'m s-1'`` and ``'m/s'`` are different on purpose.
 
     Declared units are compared with the variable's ``units`` attribute as plain
     strings: no unit parsing or normalisation, so ``m s-1`` does not match ``m/s``. A
@@ -260,8 +272,8 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
     Returns
     -------
     list of str
-        One message per missing variable, dimension mismatch or units mismatch. A
-        variable with both wrong dimensions and wrong units gets one of each.
+        One message per missing variable, dimension mismatch, standard-name mismatch or
+        units mismatch. A variable with several of these gets one of each.
     """
     problems: list[str] = []
     for spec in config.input_variables:
@@ -279,6 +291,19 @@ def _validate_variables(ds: xr.Dataset, config: Config, coords: CoordNames) -> l
                 f"variable {spec.name!r} has dimensions {tuple(map(str, ds[spec.name].dims))} "
                 f"but {spec} implies {spec.dims(coords.time, coords.y, coords.x)}"
             )
+
+        if spec.standard_name is not None:
+            actual_name = ds[spec.name].attrs.get("standard_name")
+            if actual_name is None:
+                problems.append(
+                    f"variable {spec.name!r} has no 'standard_name' attribute but "
+                    f"INPUT_VARIABLES declares standard_name {spec.standard_name!r}"
+                )
+            elif not (isinstance(actual_name, str) and actual_name == spec.standard_name):
+                problems.append(
+                    f"variable {spec.name!r} has standard_name {actual_name!r} but "
+                    f"INPUT_VARIABLES declares standard_name {spec.standard_name!r}"
+                )
 
         if spec.units is not None:
             actual_units = ds[spec.name].attrs.get("units")

@@ -239,3 +239,33 @@ def test_provenance_does_not_clobber_the_fixed_dataset_attributes(monkeypatch):
 
     assert "source" in fixed
     assert not set(fixed) & set(config.provenance())
+
+
+def test_output_only_level_coordinate_must_have_a_known_cf_description():
+    env = MINIMAL | {"LEVEL_COORDS": "myLevels:1/2", "OUTPUT_VARIABLES": "z@myLevels"}
+    with pytest.raises(ConfigError, match="not one of the known level coordinates"):
+        Config.from_env(env)
+
+
+def test_known_output_only_level_coordinate_is_accepted():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "heightAboveGround:10/100",
+        "OUTPUT_VARIABLES": "u@heightAboveGround",
+    }
+    assert Config.from_env(env).n_output_channels == 2
+
+
+def test_level_coordinate_read_from_the_input_needs_no_known_description():
+    env = MINIMAL | {
+        "LEVEL_COORDS": "myLevels:1/2",
+        "INPUT_VARIABLES": "q@myLevels",
+        "OUTPUT_VARIABLES": "q@myLevels",
+    }
+    assert Config.from_env(env).n_output_channels == 2
+
+
+def test_output_only_levels_are_not_checked_when_a_variable_list_is_missing():
+    env = {key: value for key, value in MINIMAL.items() if key != "INPUT_VARIABLES"}
+    env |= {"LEVEL_COORDS": "myLevels:1/2", "OUTPUT_VARIABLES": "z@myLevels"}
+    with pytest.raises(ConfigError, match="^INPUT_VARIABLES is required but not set$"):
+        Config.from_env(env)

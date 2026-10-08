@@ -1,8 +1,14 @@
-"""Coordinate discovery and the "2D regular grid" assumption, made explicit.
+"""Coordinate discovery from CF attributes, and the "2D regular grid" assumption.
 
-cf-xarray does the CF-convention work (standard_name, axis, units, positive attrs);
-this module only resolves its answers into a single name per axis, applies env-var
-overrides, and enforces that the horizontal grid really is regular.
+Every coordinate this model relies on must *say what it is* through its CF attributes —
+``axis``, ``standard_name``, ``units`` or ``positive`` — and cf-xarray reads them.
+Nothing is guessed from a name: a store whose ``time`` variable carries no CF metadata
+is not a valid input, however obvious the name looks. The TIME_COORD / Y_COORD /
+X_COORD overrides only choose *between* CF-identified candidates; they cannot vouch for
+a coordinate that does not describe itself.
+
+This module resolves cf-xarray's answers into a single name per axis, identifies
+vertical coordinates, and enforces that the horizontal grid really is regular.
 """
 
 from __future__ import annotations
@@ -14,20 +20,38 @@ import numpy as np
 import xarray as xr
 from loguru import logger
 
-from .errors import InputError
+from .errors import InputError, format_problems
 
 #: Relative tolerance on grid spacing. Coordinates are usually float32 degrees or
 #: metres, so exact equality of successive deltas is too strict to be useful.
 GRID_RTOL = 1e-3
 
-#: Last-resort name matching, for stores with no usable CF attributes at all.
-_FALLBACK_NAMES = {
-    "time": ("time", "valid_time", "t"),
-    "y": ("y", "latitude", "lat", "yc"),
-    "x": ("x", "longitude", "lon", "xc"),
+_LATLON_STANDARD_NAMES = {"latitude", "longitude"}
+
+#: cf-xarray keys consulted for each axis: first its ``axes`` mapping, then its
+#: ``coordinates`` mapping. Axes win, so a projected store that also carries 2D
+#: latitude/longitude auxiliary coordinates resolves to its projected x and y.
+_CF_KEYS = {
+    "time": ("T", "time"),
+    "y": ("Y", "latitude"),
+    "x": ("X", "longitude"),
 }
 
-_LATLON_STANDARD_NAMES = {"latitude", "longitude"}
+#: What an axis needs to be recognised, for error messages.
+_CF_REQUIREMENTS = {
+    "time": "axis='T', standard_name='time', or CF time units ('<unit> since <date>')",
+    "y": (
+        "axis='Y', standard_name='latitude' / 'projection_y_coordinate' / "
+        "'grid_latitude', or units='degrees_north'"
+    ),
+    "x": (
+        "axis='X', standard_name='longitude' / 'projection_x_coordinate' / "
+        "'grid_longitude', or units='degrees_east'"
+    ),
+}
+
+#: Units by which CF identifies a vertical coordinate even without ``positive``.
+_PRESSURE_UNITS = {"pa", "hpa", "kpa", "mbar", "millibar", "bar", "decibar", "dbar", "atm"}
 
 
 @dataclass(frozen=True)
@@ -63,17 +87,15 @@ def detect_coords(
     y: str | None = None,
     x: str | None = None,
 ) -> CoordNames:
-    """Resolve the time/y/x coordinate names, preferring explicit overrides.
-
-    Order of preference: env-var override, then cf-xarray's axes, then cf-xarray's
-    coordinates, then plain-name matching.
+    """Resolve the time/y/x coordinate names from their CF attributes.
 
     Parameters
     ----------
     ds : xarray.Dataset
         The opened input store.
     time, y, x : str or None, optional
-        Explicit overrides from TIME_COORD / Y_COORD / X_COORD. ``None`` means detect.
+        Explicit choices from TIME_COORD / Y_COORD / X_COORD. ``None`` means detect.
+        A choice must still be a coordinate CF identifies as that axis.
 
     Returns
     -------
@@ -83,36 +105,69 @@ def detect_coords(
     Raises
     ------
     InputError
-        If an override names a variable the store does not have, if cf-xarray matches
-        more than one candidate for an axis, or if no candidate can be found. Each
-        message names the environment variable that settles the question.
-
-    Notes
-    -----
-    ``guess_coord_axis`` is applied first, which fills in axis and standard_name attrs
-    for common names and lets the cf accessor answer for loosely CF-compliant stores.
+        If no coordinate is CF-identified as one of the axes, if more than one is and
+        no override picks between them, or if an override names a variable that is
+        absent or not CF-identified as that axis. Every axis is resolved before
+        raising, so a store missing all its CF metadata reports all three at once.
     """
-    guessed = ds.cf.guess_coord_axis()
-    axes = guessed.cf.axes
-    coordinates = guessed.cf.coordinates
+    candidates = cf_axis_candidates(ds)
+    problems: list[str] = []
+    resolved: dict[str, str] = {}
+    for axis, override in (("time", time), ("y", y), ("x", x)):
+        try:
+            resolved[axis] = _resolve(ds, axis, override, candidates[axis])
+        except InputError as exc:
+            problems.append(str(exc))
+    if problems:
+        if len(problems) == 1:
+            raise InputError(problems[0])
+        raise InputError(format_problems("Could not resolve the input's coordinates:", problems))
 
-    resolved_time = _resolve(ds, "time", time, axes.get("T"), coordinates.get("time"))
-    resolved_y = _resolve(ds, "y", y, axes.get("Y"), coordinates.get("latitude"))
-    resolved_x = _resolve(ds, "x", x, axes.get("X"), coordinates.get("longitude"))
+    kind = _grid_kind(ds, resolved["y"], resolved["x"], ds.cf.coordinates)
+    logger.info(
+        f"Coordinates (from CF attributes): time={resolved['time']} y={resolved['y']} "
+        f"x={resolved['x']} ({kind} grid)"
+    )
+    return CoordNames(time=resolved["time"], y=resolved["y"], x=resolved["x"], kind=kind)
 
-    kind = _grid_kind(ds, resolved_y, resolved_x, coordinates)
-    logger.info(f"Coordinates: time={resolved_time} y={resolved_y} x={resolved_x} ({kind} grid)")
-    return CoordNames(time=resolved_time, y=resolved_y, x=resolved_x, kind=kind)
+
+def cf_axis_candidates(ds: xr.Dataset) -> dict[str, list[list[str]]]:
+    """List the coordinates CF attributes identify as each of time, y and x.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset to inspect.
+
+    Returns
+    -------
+    dict of str to list of list of str
+        For each axis, candidate groups in order of preference: cf-xarray's ``axes``
+        match, then its ``coordinates`` match. For time, a datetime-typed variable
+        decoded from CF time units (``'hours since ...'``, which xarray moves into
+        ``.encoding``) is added to the second group, since CF identifies time by its
+        units alone.
+    """
+    axes = ds.cf.axes
+    coordinates = ds.cf.coordinates
+    out: dict[str, list[list[str]]] = {}
+    for axis, (axis_key, coord_key) in _CF_KEYS.items():
+        out[axis] = [
+            sorted({str(c) for c in axes.get(axis_key, []) if c in ds.variables}),
+            sorted({str(c) for c in coordinates.get(coord_key, []) if c in ds.variables}),
+        ]
+    decoded_time = [
+        str(name)
+        for name, var in ds.variables.items()
+        if np.issubdtype(var.dtype, np.datetime64)
+        and " since " in str(var.encoding.get("units", var.attrs.get("units", "")))
+    ]
+    out["time"][1] = sorted(set(out["time"][1]) | set(decoded_time))
+    return out
 
 
-def _resolve(
-    ds: xr.Dataset,
-    axis: str,
-    override: str | None,
-    from_axes: list[str] | None,
-    from_coordinates: list[str] | None,
-) -> str:
-    """Resolve one axis to a single coordinate name.
+def _resolve(ds: xr.Dataset, axis: str, override: str | None, candidates: list[list[str]]) -> str:
+    """Resolve one axis to a single CF-identified coordinate name.
 
     Parameters
     ----------
@@ -121,11 +176,9 @@ def _resolve(
     axis : {'time', 'y', 'x'}
         Which axis is being resolved; also determines the env var named in errors.
     override : str or None
-        Explicit override, which wins when set.
-    from_axes : list of str or None
-        Candidates from ``ds.cf.axes``.
-    from_coordinates : list of str or None
-        Candidates from ``ds.cf.coordinates``.
+        Explicit choice, which wins when set — provided CF identifies it as ``axis``.
+    candidates : list of list of str
+        Candidate groups from :func:`cf_axis_candidates`, most preferred first.
 
     Returns
     -------
@@ -135,10 +188,11 @@ def _resolve(
     Raises
     ------
     InputError
-        If the override is absent from the store, the candidates are ambiguous, or
-        nothing matches.
+        If the override is absent or not CF-identified, the candidates are ambiguous,
+        or nothing is CF-identified as this axis.
     """
     env_var = f"{axis.upper()}_COORD"
+    identified = sorted({name for group in candidates for name in group})
 
     if override is not None:
         if override not in ds.variables:
@@ -146,28 +200,74 @@ def _resolve(
                 f"{env_var}={override!r} but the input has no such variable. "
                 f"Available: {', '.join(sorted(map(str, ds.variables)))}"
             )
+        if override not in identified:
+            raise InputError(
+                f"{env_var}={override!r} but its attributes do not identify it as the "
+                f"{axis} coordinate ({_describe(ds, override)}); it needs "
+                f"{_CF_REQUIREMENTS[axis]}"
+            )
         return override
 
-    for candidates in (from_axes, from_coordinates):
-        if not candidates:
-            continue
-        unique = sorted({str(c) for c in candidates if c in ds.variables})
-        if len(unique) == 1:
-            return unique[0]
-        if len(unique) > 1:
+    for group in candidates:
+        if len(group) == 1:
+            return group[0]
+        if len(group) > 1:
             raise InputError(
-                f"Ambiguous {axis} coordinate: cf-xarray matched {', '.join(unique)}. "
+                f"Ambiguous {axis} coordinate: CF attributes identify {', '.join(group)}. "
                 f"Set {env_var} to pick one."
             )
 
-    for name in _FALLBACK_NAMES[axis]:
-        if name in ds.variables:
-            return name
-
     raise InputError(
-        f"Could not identify the {axis} coordinate in the input. Set {env_var} explicitly. "
-        f"Available: {', '.join(sorted(map(str, ds.variables)))}"
+        f"No coordinate in the input is identified as the {axis} coordinate by its CF "
+        f"attributes; it needs {_CF_REQUIREMENTS[axis]}. Coordinates present: "
+        f"{'; '.join(_describe(ds, str(c)) for c in sorted(map(str, ds.coords))) or '(none)'}"
     )
+
+
+def _describe(ds: xr.Dataset, name: str) -> str:
+    """Summarise a variable's CF-relevant attributes for an error message.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset holding the variable.
+    name : str
+        Variable name.
+
+    Returns
+    -------
+    str
+        ``name`` followed by whichever of ``axis``, ``standard_name``, ``units`` and
+        ``positive`` it carries, or ``"no CF attributes"``.
+    """
+    attrs = ds[name].attrs
+    shown = [
+        f"{k}={attrs[k]!r}" for k in ("axis", "standard_name", "units", "positive") if k in attrs
+    ]
+    return f"{name!r} ({', '.join(shown) if shown else 'no CF attributes'})"
+
+
+def is_vertical_coord(ds: xr.Dataset, name: str) -> bool:
+    """Say whether CF attributes identify a variable as a vertical coordinate.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset holding the variable.
+    name : str
+        Variable name.
+
+    Returns
+    -------
+    bool
+        ``True`` when cf-xarray matches it as ``Z`` or ``vertical`` (``axis='Z'``, a
+        vertical ``standard_name``, or a ``positive`` attribute), or its units are a
+        pressure, which CF accepts as identifying on their own.
+    """
+    found = set(ds.cf.axes.get("Z", [])) | set(ds.cf.coordinates.get("vertical", []))
+    if name in found:
+        return True
+    return str(ds[name].attrs.get("units", "")).strip().lower() in _PRESSURE_UNITS
 
 
 def _grid_kind(ds: xr.Dataset, y_name: str, x_name: str, coordinates: dict[str, list[str]]) -> str:

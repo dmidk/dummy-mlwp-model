@@ -20,9 +20,20 @@ waiting for the real model. To be useful in that role it is deliberately:
 - There is a **time axis**, strictly increasing and evenly spaced.
 - Variables are `(time, y, x)`, or `(time, level, y, x)` when a level coordinate is declared.
   Dimension order in the store does not matter; it is transposed as needed.
+- **Every coordinate describes itself with CF attributes.** Coordinates are identified
+  with [cf-xarray](https://cf-xarray.readthedocs.io/) from their attributes alone — never
+  from their names — so a store whose `time` variable carries no CF metadata is rejected
+  (exit 3), however obvious the name looks:
 
-Coordinates are discovered with [cf-xarray](https://cf-xarray.readthedocs.io/) from CF
-attributes, and can be overridden when the store is not CF-compliant.
+  | Axis | Identified by (any one of) |
+  | --- | --- |
+  | time | `axis: T`, `standard_name: time`, or CF time units (`hours since …`) |
+  | y | `axis: Y`, `standard_name: latitude` / `projection_y_coordinate` / `grid_latitude`, or `units: degrees_north` |
+  | x | `axis: X`, `standard_name: longitude` / `projection_x_coordinate` / `grid_longitude`, or `units: degrees_east` |
+  | level | `axis: Z`, `positive: up`/`down`, a vertical `standard_name` (`air_pressure`, `height`, …), or pressure units |
+
+  A projected store that also carries 2D latitude/longitude auxiliary coordinates
+  resolves to its projected `x`/`y`, since `axis`/projection standard names win.
 
 ## Configuration
 
@@ -53,22 +64,33 @@ and none of it should fail a run. Only names are logged, never values.
 Variable spec grammar, per comma-separated entry:
 
 ```
-name[:units][@levelCoordName]
+name[=standard_name][:units][@levelCoordName]
 ```
 
 ```sh
 LEVEL_COORDS=isobaricInhPa:850/500/250,heightAboveGround:10/100
-INPUT_VARIABLES=t2m,u10,v10,t@isobaricInhPa
-OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa
+INPUT_VARIABLES=t2m=air_temperature:K,u10=eastward_wind,v10,t:K@isobaricInhPa
+OUTPUT_VARIABLES=t2m=air_temperature:K,tp:mm,z:m2s-2@isobaricInhPa,leewave
 ```
 
 On input the spec is an assertion: the variable must exist with exactly those dimensions,
-and a referenced level coordinate must match `LEVEL_COORDS` value for value. When `units`
-is given, the variable's `units` attribute must equal it exactly, compared as a plain
-string with no unit parsing or normalisation: `u10:m/s` fails against a store that says
-`m s-1`, and a variable with no `units` attribute fails any declared units. Leave the
-units off an input entry to skip the check. On output the spec is a construction
-instruction — `units` is written to the variable's attributes.
+a referenced level coordinate must match `LEVEL_COORDS` value for value and be
+CF-identified as vertical, and any declared `standard_name` or `units` must equal the
+variable's attribute exactly. Both are compared as plain strings, with no unit parsing or
+normalisation: `u10:m/s` fails against a store that says `m s-1`, and a variable without
+the attribute fails any declared value. Leave either off an input entry to skip its
+check. On output the spec is a construction instruction — `standard_name` and `units`
+are written to the variable's attributes.
+
+Both are optional, because not every field has a CF standard name — a model-specific
+scalar such as `leewave` above is written with neither, and nothing is invented for it.
+Its *coordinates* still carry full CF attributes: every output coordinate (time, y, x,
+levels) gets an `axis` and a `standard_name`, so a reader can identify them without
+knowing our names. Horizontal coordinates and level coordinates read from the input
+keep the input's attributes. A level coordinate used only by `OUTPUT_VARIABLES` has
+nothing to copy from, so it must be one whose CF description is built in —
+`isobaricInhPa`, `isobaricInPa`, `heightAboveGround`, `heightAboveSea`,
+`depthBelowLand`, `hybrid` (following cfgrib) — or the run fails at startup (exit 2).
 
 ### Forecast horizon
 
@@ -94,9 +116,13 @@ description of a diagnostic evaluated on its own input times.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `TIME_COORD` | auto | Override time coordinate detection |
-| `X_COORD` | auto | Override x/longitude coordinate detection |
-| `Y_COORD` | auto | Override y/latitude coordinate detection |
+| `TIME_COORD` | auto | Pick the time coordinate when CF attributes identify several |
+| `X_COORD` | auto | Pick the x/longitude coordinate when CF attributes identify several |
+| `Y_COORD` | auto | Pick the y/latitude coordinate when CF attributes identify several |
+
+An override chooses *between* CF-identified candidates; it does not excuse a coordinate
+that lacks CF attributes. Naming one that is not identified as that axis is an input
+error.
 
 ### Behaviour
 
@@ -183,8 +209,8 @@ python scripts/make_test_input.py /tmp/in.zarr --kind projected --levels 850 500
 INPUT_ZARR=/tmp/in.zarr \
 OUTPUT_ZARR=/tmp/out.zarr \
 LEVEL_COORDS=isobaricInhPa:850/500/250 \
-INPUT_VARIABLES=t2m,u10,v10,t:K@isobaricInhPa \
-OUTPUT_VARIABLES=t2m:K,tp:mm,z:m2s-2@isobaricInhPa \
+INPUT_VARIABLES=t2m=air_temperature:K,u10,v10,t:K@isobaricInhPa \
+OUTPUT_VARIABLES=t2m=air_temperature:K,tp:mm,z:m2s-2@isobaricInhPa \
 N_FORECAST_STEPS=8 \
 DEVICE=cpu \
 python -m dummy_mlwp
