@@ -3,6 +3,16 @@
 This application stands in for a real model while pipelines are built around it, so
 failures must be unambiguous: the exit code says which layer rejected the run, and the
 message says exactly what to change.
+
+==== ===================================================================================
+Code Meaning
+==== ===================================================================================
+1    Anything unexpected: not one of these classes, so a bug, logged with its traceback
+2    :class:`ConfigError` — the environment is wrong
+3    :class:`InputError` — the input store is missing or does not match the configuration
+4    :class:`DeviceError` — the requested compute device is unusable
+5    :class:`StorageError` — a store could not be reached, read or written
+==== ===================================================================================
 """
 
 from __future__ import annotations
@@ -54,6 +64,24 @@ class DeviceError(DummyMLWPError):
     """
 
     exit_code = 4
+
+
+class StorageError(DummyMLWPError):
+    """A store could not be reached, read or written.
+
+    This is the layer below the data — missing or rejected credentials, access denied,
+    an unreachable endpoint, a destination that cannot be written — so it says nothing
+    about the store's contents. An input store that simply does not exist stays an
+    :class:`InputError`, since that is a wrong ``INPUT_ZARR`` rather than a failure to
+    reach the store.
+
+    Attributes
+    ----------
+    exit_code : int
+        Always 5.
+    """
+
+    exit_code = 5
 
 
 def format_problems(headline: str, problems: list[str]) -> str:

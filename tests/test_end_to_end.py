@@ -6,16 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from dummy_mlwp.__main__ import main
+from helpers import invoke
 
 LEVELS = "isobaricInhPa:850/500/250"
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 def open_output(env: dict[str, str]) -> xr.Dataset:
@@ -89,11 +82,51 @@ def test_latlon_input(monkeypatch, tmp_path, make_input):
     assert out.attrs["grid_type"] == "latlon"
 
 
+def test_output_coordinates_are_identifiable_from_cf_attributes(monkeypatch, base_env):
+    """A reader that knows nothing of our names must still find every axis."""
+    from dummy_mlwp.grid import detect_coords, is_vertical_coord
+
+    env = base_env | {
+        "LEVEL_COORDS": "isobaricInhPa:850/500/250,heightAboveGround:10/100",
+        "INPUT_VARIABLES": "t2m=air_temperature:K,t=air_temperature:K@isobaricInhPa",
+        "OUTPUT_VARIABLES": (
+            "t2m=air_temperature:K,z@isobaricInhPa,u=eastward_wind:m s-1@heightAboveGround,leewave"
+        ),
+        "N_FORECAST_STEPS": "2",
+    }
+    assert invoke(monkeypatch, env) == 0
+    out = open_output(env)
+
+    coords = detect_coords(out)
+    assert (coords.time, coords.y, coords.x) == ("time", "y", "x")
+    assert out.time.attrs["axis"] == "T"
+    assert (out.y.attrs["axis"], out.x.attrs["axis"]) == ("Y", "X")
+    for name in ("isobaricInhPa", "heightAboveGround"):
+        assert is_vertical_coord(out, name)
+        assert out[name].attrs["axis"] == "Z"
+    assert out.heightAboveGround.attrs["standard_name"] == "height"
+    assert out.isobaricInhPa.attrs["units"] == "hPa"
+
+    assert out.t2m.attrs["standard_name"] == "air_temperature"
+    assert out.u.attrs["standard_name"] == "eastward_wind"
+    assert "standard_name" not in out.z.attrs
+    assert "standard_name" not in out.leewave.attrs
+    assert out.forecastReferenceTime.attrs["standard_name"] == "forecast_reference_time"
+    assert out.leadTime.attrs["standard_name"] == "forecast_period"
+
+
 def test_projected_run_keeps_the_crs(monkeypatch, base_env):
     assert invoke(monkeypatch, base_env) == 0
     out = open_output(base_env)
     assert "crs" in out.variables
     assert out.t2m.attrs["grid_mapping"] == "crs"
+
+
+def test_output_attributes_record_the_version_and_the_input(monkeypatch, base_env):
+    assert invoke(monkeypatch, base_env) == 0
+    out = open_output(base_env)
+    assert out.attrs["source"].startswith("dummy-mlwp-model ")
+    assert out.attrs["input_zarr"] == base_env["INPUT_ZARR"]
 
 
 def test_transposed_input_dimensions_are_accepted(monkeypatch, tmp_path, make_input):
@@ -223,6 +256,21 @@ def test_fsspec_uris_work_for_both_input_and_output(monkeypatch, base_env):
     assert set(out.data_vars) == {"t2m", "tp", "crs"}
 
 
+def test_misspelled_variable_warns_but_the_run_succeeds(monkeypatch, base_env, capsys):
+    """N_FORECAST_STEP (no S) is not read, so the default -1 applies; the log says why."""
+    monkeypatch.delenv("N_FORECAST_STEPS", raising=False)
+    env = base_env | {"N_FORECAST_STEP": "8"}
+    assert invoke(monkeypatch, env) == 0
+
+    stderr = capsys.readouterr().err
+    assert "WARNING" in stderr
+    assert "N_FORECAST_STEP has no effect" in stderr
+    assert "Did you mean N_FORECAST_STEPS?" in stderr
+
+    source = xr.open_zarr(env["INPUT_ZARR"])
+    assert np.array_equal(open_output(env).time.values, source.time.values)
+
+
 # --- failure paths -------------------------------------------------------------------
 
 
@@ -233,6 +281,18 @@ def test_missing_required_variable_exits_2(monkeypatch, base_env):
     assert invoke(monkeypatch, env) == 2
 
 
+def test_misspelling_is_reported_before_the_config_error_it_causes(monkeypatch, base_env, capsys):
+    """A typo is often the reason a variable is "required but not set"; say so first."""
+    env = dict(base_env)
+    env["INPUT_VARIABLE"] = env.pop("INPUT_VARIABLES")
+    monkeypatch.delenv("INPUT_VARIABLES", raising=False)
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "Did you mean INPUT_VARIABLES?" in stderr
+    assert stderr.index("Did you mean INPUT_VARIABLES?") < stderr.index("| ERROR")
+
+
 def test_bad_output_mode_exits_2(monkeypatch, base_env):
     assert invoke(monkeypatch, base_env | {"OUTPUT_MODE": "vibes"}) == 2
 
@@ -240,6 +300,23 @@ def test_bad_output_mode_exits_2(monkeypatch, base_env):
 def test_undeclared_level_coordinate_exits_2(monkeypatch, base_env):
     env = base_env | {"OUTPUT_VARIABLES": "z@isobaricInhPa"}
     assert invoke(monkeypatch, env) == 2
+
+
+def test_all_config_problems_are_reported_together(monkeypatch, base_env, tmp_path, capsys):
+    """Three bad variables should take one run to diagnose, not three."""
+    env = base_env | {
+        "OUTPUT_MODE": "vibes",
+        "N_FORECAST_STEPS": "0",
+        "SRC_STORAGE_OPTIONS": "not json",
+    }
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "The environment configuration has 3 problems:" in stderr
+    assert "OUTPUT_MODE must be one of" in stderr
+    assert "N_FORECAST_STEPS must be -1" in stderr
+    assert "SRC_STORAGE_OPTIONS must be valid JSON" in stderr
+    assert not (tmp_path / "out.zarr").exists()
 
 
 def test_missing_input_variable_exits_3(monkeypatch, base_env):
@@ -281,6 +358,61 @@ def test_irregular_grid_exits_3(monkeypatch, tmp_path, make_input):
         "DEVICE": "cpu",
     }
     assert invoke(monkeypatch, env) == 3
+
+
+def _rewrite(make_input, tmp_path, edit, levels=None):
+    """Write a copy of a synthetic input store with ``edit`` applied to it."""
+    ds = xr.open_zarr(make_input(levels=levels)).load()
+    edit(ds)
+    path = tmp_path / "edited.zarr"
+    ds.to_zarr(path, mode="w", consolidated=True, zarr_format=3)
+    return path
+
+
+def test_coordinates_without_cf_attributes_exit_3(monkeypatch, base_env, tmp_path, make_input):
+    def strip(ds):
+        for name in ("y", "x"):
+            ds[name].attrs.clear()
+
+    env = base_env | {"INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip))}
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_override_does_not_excuse_missing_cf_attributes(
+    monkeypatch, base_env, tmp_path, make_input
+):
+    def strip(ds):
+        ds["x"].attrs.clear()
+
+    env = base_env | {"INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip)), "X_COORD": "x"}
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_non_vertical_level_coordinate_exits_3(monkeypatch, base_env, tmp_path, make_input):
+    def strip(ds):
+        ds["isobaricInhPa"].attrs = {"long_name": "pressure"}
+
+    env = base_env | {
+        "INPUT_ZARR": str(_rewrite(make_input, tmp_path, strip, levels=[850.0, 500.0, 250.0])),
+        "LEVEL_COORDS": LEVELS,
+        "INPUT_VARIABLES": "t@isobaricInhPa",
+    }
+    assert invoke(monkeypatch, env) == 3
+
+
+def test_declared_standard_name_and_units_are_asserted(monkeypatch, base_env, capsys):
+    env = base_env | {"INPUT_VARIABLES": "t2m=air_temperature:K,u10=northward_wind,v10:K"}
+    assert invoke(monkeypatch, env) == 3
+
+    stderr = capsys.readouterr().err
+    assert "'u10' has standard_name 'eastward_wind'" in stderr
+    assert "'v10' has units 'm s-1'" in stderr
+    assert "'t2m'" not in stderr
+
+
+def test_matching_standard_names_and_units_pass(monkeypatch, base_env):
+    env = base_env | {"INPUT_VARIABLES": "t2m=air_temperature:K,u10=eastward_wind:m s-1"}
+    assert invoke(monkeypatch, env) == 0
 
 
 def test_missing_store_exits_3(monkeypatch, base_env, tmp_path):
