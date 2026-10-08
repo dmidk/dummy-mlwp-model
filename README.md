@@ -26,6 +26,20 @@ attributes, and can be overridden when the store is not CF-compliant.
 
 ## Configuration
 
+A variable this application does not read has no effect, so `N_FORECAST_STEP=8` (no `S`)
+would quietly leave `N_FORECAST_STEPS` at its default. To catch that, any set variable
+that looks meant for this application but is not one it reads — a close misspelling or
+wrong-case spelling of a known name, or an unknown `SRC_`/`DST_` name — is logged at
+startup as a warning with a suggestion:
+
+```
+WARNING  | dummy_mlwp.envvars - Environment variable N_FORECAST_STEP has no effect: this application does not read it. Did you mean N_FORECAST_STEPS?
+```
+
+This is a warning, not an error: a container's environment is mostly not ours —
+Kubernetes service links such as `INPUT_SERVICE_HOST`, `NVIDIA_*`, boto's own `AWS_*` —
+and none of it should fail a run. Only names are logged, never values.
+
 ### Paths and variables
 
 | Variable | Default | Meaning |
