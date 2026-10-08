@@ -36,6 +36,11 @@ try:
 except ImportError:  # optional: it arrives with s3fs
     botocore_exceptions = None
 
+try:
+    import aiohttp
+except ImportError:  # optional: it arrives with s3fs
+    aiohttp = None
+
 needs_botocore = pytest.mark.skipif(botocore_exceptions is None, reason="needs botocore")
 
 MINIMAL = {
@@ -126,6 +131,8 @@ def storage_failures():
         TimeoutError("timed out"),
         ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"),
     ]
+    if aiohttp is not None:
+        failures.append(aiohttp.ClientPayloadError("Response payload is not completed"))
     if botocore_exceptions is None:
         return failures
     return failures + [

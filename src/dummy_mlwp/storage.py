@@ -42,10 +42,12 @@ _LOCAL_SCHEMES = ("", "file", "local")
 #: Exceptions from optional backend libraries that mean "the store could not be
 #: reached", as ``(module, class)``. s3fs translates S3 error *responses* (403, 404, ...)
 #: into ``OSError`` subclasses, but failures that never get a response — no credentials,
-#: an unknown profile, an unreachable endpoint — surface as raw botocore errors.
+#: an unknown profile, an unreachable endpoint — surface as raw botocore errors, and a
+#: download cut off mid-body as aiohttp's ``ClientPayloadError``.
 _BACKEND_ERRORS = (
     ("botocore.exceptions", "BotoCoreError"),
     ("botocore.exceptions", "ClientError"),
+    ("aiohttp", "ClientError"),
     ("gcsfs.retry", "HttpError"),
     ("google.auth.exceptions", "GoogleAuthError"),
 )
@@ -149,7 +151,7 @@ def storage_exceptions() -> tuple[type[BaseException], ...]:
     tuple of type
         ``OSError`` — which covers local permission errors, connection and timeout
         errors, and the S3 error responses s3fs translates — plus the error base
-        classes of whichever backend libraries are loaded (botocore, gcsfs,
+        classes of whichever backend libraries are loaded (botocore, aiohttp, gcsfs,
         google-auth). Never ``Exception``: a programming error must stay an
         unexpected failure, with its traceback.
 
