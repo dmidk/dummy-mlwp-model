@@ -67,9 +67,12 @@ class FlakyFileSystem(MemoryFileSystem):
     pseudo_dirs = [""]
     error: BaseException | None = None
     match = ""
+    #: Spare suffix reads, which is how zarr reads a shard's index.
+    chunks_only = False
 
     def cat_file(self, path, start=None, end=None, **kwargs):
-        if self.error is not None and self.match in path:
+        suffix = self.chunks_only and start is not None and start < 0
+        if self.error is not None and self.match in path and not suffix:
             raise self.error
         return super().cat_file(path, start=start, end=end, **kwargs)
 
@@ -88,9 +91,10 @@ def flaky(monkeypatch):
     FlakyFileSystem.store.clear()
     FlakyFileSystem.pseudo_dirs[:] = [""]
 
-    def _arm(error: BaseException, match: str = "") -> None:
+    def _arm(error: BaseException, match: str = "", chunks_only: bool = False) -> None:
         monkeypatch.setattr(FlakyFileSystem, "error", error)
         monkeypatch.setattr(FlakyFileSystem, "match", match)
+        monkeypatch.setattr(FlakyFileSystem, "chunks_only", chunks_only)
 
     yield _arm
     FlakyFileSystem.store.clear()
@@ -273,6 +277,32 @@ def test_failing_to_read_the_data_is_a_storage_error(flaky, flaky_input):
     config = Config.from_env(MINIMAL)
     flaky(PermissionError("Access Denied"), match="t2m/c/")
     with pytest.raises(StorageError, match="Could not read the input store 'flaky://in.zarr'"):
+        stack_channels(ds, config.input_variables, config, detect_coords(ds))
+
+
+def test_failing_to_read_part_of_a_shard_is_a_storage_error(flaky, make_dataset):
+    source = make_dataset(levels=[850.0, 500.0, 250.0])
+    _, nl, ny, nx = source.t.shape
+    encoding = {"t": {"chunks": (1, 1, ny, nx), "shards": (1, nl, ny, nx)}}
+    source.to_zarr("flaky://in.zarr", mode="w", zarr_format=3, encoding=encoding)
+    config = Config.from_env(
+        MINIMAL
+        | {"INPUT_VARIABLES": "t@isobaricInhPa", "LEVEL_COORDS": "isobaricInhPa:850/500/250"}
+    )
+    ds = open_input("flaky://in.zarr")
+    flaky(PermissionError("Access Denied"), match="t/c/", chunks_only=True)
+    with pytest.raises(StorageError, match="Could not read the input store") as info:
+        stack_channels(ds, config.input_variables, config, detect_coords(ds))
+    assert "PermissionError: Access Denied" in str(info.value)
+    assert isinstance(info.value.__cause__, BaseExceptionGroup)
+
+
+def test_a_programming_error_in_an_exception_group_is_not_mistaken_for_storage(flaky, flaky_input):
+    ds = open_input(flaky_input)
+    config = Config.from_env(MINIMAL)
+    group = ExceptionGroup("chunk read failed", [PermissionError("denied"), RuntimeError("bug")])
+    flaky(group, match="t2m/c/")
+    with pytest.raises(ExceptionGroup):
         stack_channels(ds, config.input_variables, config, detect_coords(ds))
 
 

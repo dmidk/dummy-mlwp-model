@@ -359,6 +359,17 @@ def stack_channels(
         raise storage_error(
             "SRC", config.input_zarr, config.src_storage_options, "read", exc
         ) from exc
+    except BaseExceptionGroup as group:
+        # zarr reports a failed read of part of a shard as a group (PEP 654).
+        failures, rest = group.split(storage_exceptions())
+        if failures is None or rest is not None:
+            raise
+        first = failures
+        while isinstance(first, BaseExceptionGroup):
+            first = first.exceptions[0]
+        raise storage_error(
+            "SRC", config.input_zarr, config.src_storage_options, "read", first
+        ) from group
 
     if not np.isfinite(out).all():
         n_bad = int((~np.isfinite(out)).sum())
