@@ -131,7 +131,7 @@ error.
 | `OUTPUT_MODE` | `random` | `random`, `persistence`, `constant`, `zeros` — see below |
 | `RANDOM_SEED` | `0` | Seeds the network weights; runs are reproducible |
 | `CONSTANT_VALUE` | `0.0` | Used by `constant` mode |
-| `DEVICE` | `auto` | `auto`, `cuda`, `cpu`. `cuda` fails hard if no device is visible |
+| `DEVICE` | `auto` (`cuda` in the container image) | `auto`, `cuda`, `cpu`. `cuda` fails hard if no device is visible |
 | `MODEL_HIDDEN_CHANNELS` | `64` | Network width — how much GPU work happens |
 | `MODEL_LAYERS` | `4` | Network depth |
 | `ZARR_FORMAT` | `auto` | `auto` (match the input), `2`, `3` |
@@ -242,8 +242,12 @@ update an image it has already downloaded, so with `:latest`, run `docker pull` 
 
 To confirm the GPU is genuinely in use, look for the log line reporting the device name
 and a non-zero peak GPU memory, and check that raising `MODEL_HIDDEN_CHANNELS` increases
-both. Running with `DEVICE=cuda` but without `--gpus all` exits 4 rather than silently
-falling back to CPU.
+both.
+
+The image sets `DEVICE=cuda`, so it requires a GPU by default: started without `--gpus all`
+(or without a working driver) it exits 4 rather than silently falling back to CPU. To run
+it on a machine without a GPU, override it with `-e DEVICE=cpu`, as the CI smoke test
+does. Outside the image the default stays `auto`.
 
 ### Remote stores
 
