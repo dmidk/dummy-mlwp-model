@@ -73,6 +73,8 @@ def run(config: Config) -> None:
         If the requested device is unusable.
     ConfigError
         If the forecast resolution cannot be determined from the input.
+    StorageError
+        If the input store cannot be read or the output store cannot be written.
     """
     started = time.perf_counter()
 
@@ -153,7 +155,8 @@ def main() -> int:
     -------
     int
         0 on success; 2 for a configuration error, 3 for an input error, 4 for a
-        device error, and 1 for anything unexpected, whose traceback is logged.
+        device error, 5 for a storage error (a store could not be reached, read or
+        written), and 1 for anything unexpected, whose traceback is logged.
 
     Notes
     -----

@@ -15,21 +15,42 @@ Two deliberate choices:
   bucket is the common case for a test rig, and defaulting to signed requests turns
   that into a confusing ``NoCredentialsError``. Naming a profile, supplying keys, or
   running under an IAM role all count as credentials and switch signing back on.
+
+When a store cannot be reached anyway, :func:`storage_error` turns the failure into a
+:class:`~dummy_mlwp.errors.StorageError` (exit 5) whose hint is built from these same
+per-side options, and :func:`storage_exceptions` says which failures count.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
 from loguru import logger
 
-from .errors import ConfigError
+from .errors import ConfigError, StorageError, format_problems
 
 #: Schemes for which the S3-specific options below are meaningful.
 S3_SCHEMES = ("s3", "s3a")
+
+#: Schemes that mean a path on this machine.
+_LOCAL_SCHEMES = ("", "file", "local")
+
+#: Exceptions from optional backend libraries that mean "the store could not be
+#: reached", as ``(module, class)``. s3fs translates S3 error *responses* (403, 404, ...)
+#: into ``OSError`` subclasses, but failures that never get a response — no credentials,
+#: an unknown profile, an unreachable endpoint — surface as raw botocore errors, and a
+#: download cut off mid-body as aiohttp's ``ClientPayloadError``.
+_BACKEND_ERRORS = (
+    ("botocore.exceptions", "BotoCoreError"),
+    ("botocore.exceptions", "ClientError"),
+    ("aiohttp", "ClientError"),
+    ("gcsfs.retry", "HttpError"),
+    ("google.auth.exceptions", "GoogleAuthError"),
+)
 
 #: Environment variables that mean "this process already has AWS credentials", beyond a
 #: profile or explicit keys: the ambient role credentials used on ECS, EKS and EC2.
@@ -120,6 +141,155 @@ def storage_options(env: Mapping[str, str], uri: str, side: str) -> dict[str, An
                 f"credentials) if the bucket is not public"
             )
     return options
+
+
+def storage_exceptions() -> tuple[type[BaseException], ...]:
+    """List the exception types that mean a store could not be reached, read or written.
+
+    Returns
+    -------
+    tuple of type
+        ``OSError`` — which covers local permission errors, connection and timeout
+        errors, and the S3 error responses s3fs translates — plus the error base
+        classes of whichever backend libraries are loaded (botocore, aiohttp, gcsfs,
+        google-auth). Never ``Exception``: a programming error must stay an
+        unexpected failure, with its traceback.
+
+    Notes
+    -----
+    Backend classes are looked up in ``sys.modules`` rather than imported. An
+    exception can only have been raised once its class's module is loaded, so this
+    never imports a backend the run is not using, and costs nothing for local stores.
+    Call it in the ``except`` clause itself, which is evaluated only when an exception
+    is being matched.
+    """
+    found: list[type[BaseException]] = [OSError]
+    for module_name, class_name in _BACKEND_ERRORS:
+        cls = getattr(sys.modules.get(module_name), class_name, None)
+        if isinstance(cls, type) and issubclass(cls, BaseException):
+            found.append(cls)
+    return tuple(found)
+
+
+def storage_error(
+    side: str,
+    uri: str,
+    options: Mapping[str, Any] | None,
+    action: str,
+    exc: BaseException,
+) -> StorageError:
+    """Describe a failure to reach one store, with a hint at what to check.
+
+    Parameters
+    ----------
+    side : {'SRC', 'DST'}
+        Which store failed; also the prefix of the variables that configure it.
+    uri : str
+        The store URI.
+    options : mapping or None
+        The storage options the store was opened with, to tailor the hint — for an S3
+        URI, whether access was anonymous and which endpoint was used.
+    action : str
+        What was being attempted, e.g. ``'open'``, ``'read'``, ``'write'``.
+    exc : BaseException
+        The underlying error.
+
+    Returns
+    -------
+    StorageError
+        An error naming the side, the URI and the underlying error, followed by what
+        to check. The caller raises it ``from exc``.
+    """
+    label = {"SRC": "input", "DST": "output"}[side]
+    headline = f"Could not {action} the {label} store {uri!r}: {_describe(exc)}"
+    return StorageError(format_problems(headline, _hints(side, uri, options or {})))
+
+
+def _describe(exc: BaseException) -> str:
+    """Render an exception, and its direct cause, for an error message.
+
+    Parameters
+    ----------
+    exc : BaseException
+        The exception to render.
+
+    Returns
+    -------
+    str
+        ``'Type: message'``, followed by the explicit cause when it adds anything.
+        s3fs, for one, raises ``PermissionError('Access Denied')`` from a botocore
+        ``ClientError`` whose message also names the S3 operation that was refused.
+    """
+    text = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    cause = exc.__cause__
+    if cause is not None and str(cause) and str(cause) not in text:
+        text += f" (from {type(cause).__name__}: {cause})"
+    return text
+
+
+def _hints(side: str, uri: str, options: Mapping[str, Any]) -> list[str]:
+    """Suggest what to check after a store could not be reached.
+
+    Parameters
+    ----------
+    side : {'SRC', 'DST'}
+        Which store failed.
+    uri : str
+        The store URI, whose scheme decides which hints apply.
+    options : mapping
+        The storage options in effect for that store.
+
+    Returns
+    -------
+    list of str
+        One or more hints. For S3 they say whether access was anonymous — the default
+        without credentials, see the module docstring — and where the endpoint came
+        from, naming the ``<side>_*`` variables that change it.
+    """
+    scheme = urlsplit(uri).scheme.lower()
+    if scheme in _LOCAL_SCHEMES:
+        if side == "SRC":
+            return [
+                "check that the user running this process can read every file in the "
+                "store; in a container, also check the volume mount"
+            ]
+        return [
+            "check that the user running this process can create and write that path; "
+            "in a container, also check that the volume is not mounted read-only"
+        ]
+
+    if scheme not in S3_SCHEMES:
+        return [f"check the credentials for {scheme}:// and any {side}_STORAGE_OPTIONS"]
+
+    hints: list[str] = []
+    if options.get("anon"):
+        hints.append(
+            f"{side} is using anonymous access, the default when no credentials are "
+            f"found; if the bucket is not public, set {side}_AWS_PROFILE (or "
+            f"{side}_AWS_ACCESS_KEY_ID and {side}_AWS_SECRET_ACCESS_KEY)"
+        )
+    else:
+        profile = options.get("profile")
+        source = f"profile {profile!r}" if profile else "the credentials found"
+        hints.append(
+            f"{side} is signing requests with {source}; check they are valid and allowed "
+            f"to {'read' if side == 'SRC' else 'write'} this bucket ({side}_AWS_PROFILE, "
+            f"{side}_AWS_ACCESS_KEY_ID, or {side}_S3_ANON=true for a public bucket)"
+        )
+
+    client_kwargs = options.get("client_kwargs")
+    endpoint = options.get("endpoint_url") or (
+        client_kwargs.get("endpoint_url") if isinstance(client_kwargs, Mapping) else None
+    )
+    if endpoint:
+        hints.append(f"check that the endpoint {endpoint} is reachable from here")
+    else:
+        hints.append(
+            "no endpoint is set in the environment, so it comes from the profile's "
+            f"endpoint_url in ~/.aws/config, or is AWS itself; {side}_S3_ENDPOINT_URL "
+            "overrides it"
+        )
+    return hints
 
 
 def _s3_options(env: Mapping[str, str], side: str) -> dict[str, Any]:
