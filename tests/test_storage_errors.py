@@ -23,13 +23,13 @@ import xarray as xr
 from fsspec import register_implementation
 from fsspec.implementations.memory import MemoryFileSystem
 
-from dummy_mlwp.__main__ import main
 from dummy_mlwp.config import Config
 from dummy_mlwp.errors import InputError, StorageError
 from dummy_mlwp.grid import detect_coords
 from dummy_mlwp.inputs import open_input, stack_channels
 from dummy_mlwp.outputs import write_output
 from dummy_mlwp.storage import storage_error, storage_exceptions
+from helpers import invoke
 
 try:
     from botocore import exceptions as botocore_exceptions
@@ -116,13 +116,6 @@ def closed_port_endpoint() -> str:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     return f"http://127.0.0.1:{port}"
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 def storage_failures():
