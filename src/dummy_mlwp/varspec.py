@@ -41,8 +41,11 @@ class VarSpec:
     name : str
         Variable name as it appears in the zarr store.
     units : str or None, optional
-        Units string, written to the output variable's attributes. ``None`` means no
-        units attribute is written, and no units are asserted on input.
+        Units string. On input it is an assertion: the store variable's ``units``
+        attribute must equal it exactly, as a plain string with no unit parsing, so
+        ``m s-1`` does not match ``m/s``. On output it is written to the variable's
+        attributes. ``None`` means no units are asserted on input and no units
+        attribute is written on output.
     level_coord : str or None, optional
         Name of the level coordinate this variable is defined on, or ``None`` for a
         purely 2D field.

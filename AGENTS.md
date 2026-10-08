@@ -31,11 +31,11 @@ src/dummy_mlwp/
   varspec.py    the name[:units][@levelCoord] grammar (pure, no I/O)
   grid.py       cf-xarray coordinate discovery + regular-grid validation
   timeaxis.py   dt inference, forecast time construction
-  storage.py    per-side (SRC_/DST_) fsspec options for the two stores
+  storage.py    per-side (SRC_/DST_) fsspec options; storage failures -> StorageError
   inputs.py     open the store, assert it matches the config, pack channels
   model.py      DummyNet, device selection, forward pass, rollout
   outputs.py    assemble the output dataset, write zarr
-  errors.py     ConfigError / InputError / DeviceError, each with an exit code
+  errors.py     ConfigError / InputError / DeviceError / StorageError, each with an exit code
 scripts/
   make_test_input.py   synthetic input generator, reused by the test fixtures
 tests/
@@ -51,6 +51,10 @@ tests/
 - **Line length 100.** Run `ruff format .` rather than hand-wrapping.
 - **Versioning is `hatch-vcs` from the git tag.** Never hardcode a version; never edit
   `src/dummy_mlwp/_version.py`, which is generated.
+- **Store I/O maps its failures to `StorageError` (exit 5).** Wrap any new read or write
+  of a store in `except storage_exceptions() as exc: raise storage_error(...) from exc`
+  (both in `storage.py`). Never widen that to bare `Exception`: a programming error must
+  stay exit 1 with its traceback. A missing *input* store stays an `InputError` (exit 3).
 - Prefer the existing helpers over new ones: `channel_layout` is the single source of
   truth for channel ordering, and `scripts/make_test_input.py:build` is the single
   synthetic-data generator (the test fixtures import it).
@@ -123,10 +127,17 @@ Do not revisit these without being asked:
 - The output store's zarr format matches the input's unless `ZARR_FORMAT` says otherwise.
 - Output chunking is one timestep per chunk, full spatial extent, not configurable.
 - The container's CUDA base is amd64-only; there is no arm64 image.
+- **Images are pushed to `ghcr.io` only for version tags.** `vX.Y.Z` publishes `X.Y.Z`,
+  `X.Y` and `latest`; a PEP 440 pre-, post- or dev release tag publishes only its own
+  version and never moves `latest`. Pushes to `main` and PRs build and smoke-test the
+  image without pushing it. The image is smoke-tested *before* it is pushed.
 
 ## Pull requests
 
 CI runs the test suite on Python 3.11 and 3.12 with CPU-only torch, plus lint and an
-end-to-end smoke test. The image workflow builds on PRs but only pushes to `ghcr.io`
-from the default branch and `v*` tags. Both workflows check out with `fetch-depth: 0`,
-because `hatch-vcs` needs the tags — if you touch the workflows, keep that.
+end-to-end smoke test. The image workflow builds and smoke-tests the image on PRs and
+pushes to `main`, but only when a path that goes into the image changed (the `paths`
+list in `publish-image.yml` — extend it if you add one); it pushes to `ghcr.io` only for
+version tags. Both workflows check out with `fetch-depth: 0`, because `hatch-vcs` needs
+the tags — if you touch the workflows, keep that. Likewise `.dockerignore` must only
+exclude paths git ignores, or the image's version gets a dirty-tree date stamp.

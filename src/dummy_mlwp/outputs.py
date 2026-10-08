@@ -12,6 +12,7 @@ from .config import Config
 from .errors import InputError
 from .grid import CoordNames
 from .inputs import find_grid_mapping_vars
+from .storage import storage_error, storage_exceptions
 from .varspec import VarSpec, channel_layout
 
 
@@ -345,17 +346,29 @@ def write_output(ds: xr.Dataset, config: Config, zarr_format: int, coords: Coord
         Store format to write.
     coords : CoordNames
         Resolved coordinate names.
+
+    Raises
+    ------
+    StorageError
+        If the destination cannot be reached or written. Every ``OSError`` counts
+        here, a missing bucket or parent directory included: unlike on the input
+        side, nothing about the output store is supposed to exist beforehand.
     """
     encoding = _chunk_encoding(ds, coords)
     logger.info(f"Writing {config.output_zarr} (zarr format {zarr_format})")
-    ds.to_zarr(
-        config.output_zarr,
-        mode="w",
-        consolidated=True,
-        zarr_format=zarr_format,
-        encoding=encoding,
-        storage_options=config.dst_storage_options or None,
-    )
+    try:
+        ds.to_zarr(
+            config.output_zarr,
+            mode="w",
+            consolidated=True,
+            zarr_format=zarr_format,
+            encoding=encoding,
+            storage_options=config.dst_storage_options or None,
+        )
+    except storage_exceptions() as exc:
+        raise storage_error(
+            "DST", config.output_zarr, config.dst_storage_options, "write", exc
+        ) from exc
     logger.info(
         f"Wrote {len(ds.data_vars)} variable(s) and {ds.sizes[coords.time]} "
         f"timestep(s) to {config.output_zarr}"
