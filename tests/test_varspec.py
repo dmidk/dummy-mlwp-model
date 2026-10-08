@@ -112,6 +112,14 @@ def test_rejects_malformed_specs(text, message):
         parse_var_specs(text, {}, "OUTPUT_VARIABLES")
 
 
+def test_unknown_level_set_skips_only_the_declared_check():
+    """None means LEVEL_COORDS itself is broken: the rest of the grammar still applies."""
+    specs = parse_var_specs("t2m,t:K@isobaricInhPa", None, "INPUT_VARIABLES")
+    assert specs[1] == VarSpec("t", "K", "isobaricInhPa")
+    with pytest.raises(ConfigError, match="not a valid name"):
+        parse_var_specs("t@isobaricInhPa,2wet", None, "INPUT_VARIABLES")
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

@@ -6,16 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from dummy_mlwp.__main__ import main
+from helpers import invoke
 
 LEVELS = "isobaricInhPa:850/500/250"
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 def open_output(env: dict[str, str]) -> xr.Dataset:
@@ -127,6 +120,13 @@ def test_projected_run_keeps_the_crs(monkeypatch, base_env):
     out = open_output(base_env)
     assert "crs" in out.variables
     assert out.t2m.attrs["grid_mapping"] == "crs"
+
+
+def test_output_attributes_record_the_version_and_the_input(monkeypatch, base_env):
+    assert invoke(monkeypatch, base_env) == 0
+    out = open_output(base_env)
+    assert out.attrs["source"].startswith("dummy-mlwp-model ")
+    assert out.attrs["input_zarr"] == base_env["INPUT_ZARR"]
 
 
 def test_transposed_input_dimensions_are_accepted(monkeypatch, tmp_path, make_input):
@@ -256,6 +256,21 @@ def test_fsspec_uris_work_for_both_input_and_output(monkeypatch, base_env):
     assert set(out.data_vars) == {"t2m", "tp", "crs"}
 
 
+def test_misspelled_variable_warns_but_the_run_succeeds(monkeypatch, base_env, capsys):
+    """N_FORECAST_STEP (no S) is not read, so the default -1 applies; the log says why."""
+    monkeypatch.delenv("N_FORECAST_STEPS", raising=False)
+    env = base_env | {"N_FORECAST_STEP": "8"}
+    assert invoke(monkeypatch, env) == 0
+
+    stderr = capsys.readouterr().err
+    assert "WARNING" in stderr
+    assert "N_FORECAST_STEP has no effect" in stderr
+    assert "Did you mean N_FORECAST_STEPS?" in stderr
+
+    source = xr.open_zarr(env["INPUT_ZARR"])
+    assert np.array_equal(open_output(env).time.values, source.time.values)
+
+
 # --- failure paths -------------------------------------------------------------------
 
 
@@ -266,6 +281,18 @@ def test_missing_required_variable_exits_2(monkeypatch, base_env):
     assert invoke(monkeypatch, env) == 2
 
 
+def test_misspelling_is_reported_before_the_config_error_it_causes(monkeypatch, base_env, capsys):
+    """A typo is often the reason a variable is "required but not set"; say so first."""
+    env = dict(base_env)
+    env["INPUT_VARIABLE"] = env.pop("INPUT_VARIABLES")
+    monkeypatch.delenv("INPUT_VARIABLES", raising=False)
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "Did you mean INPUT_VARIABLES?" in stderr
+    assert stderr.index("Did you mean INPUT_VARIABLES?") < stderr.index("| ERROR")
+
+
 def test_bad_output_mode_exits_2(monkeypatch, base_env):
     assert invoke(monkeypatch, base_env | {"OUTPUT_MODE": "vibes"}) == 2
 
@@ -273,6 +300,23 @@ def test_bad_output_mode_exits_2(monkeypatch, base_env):
 def test_undeclared_level_coordinate_exits_2(monkeypatch, base_env):
     env = base_env | {"OUTPUT_VARIABLES": "z@isobaricInhPa"}
     assert invoke(monkeypatch, env) == 2
+
+
+def test_all_config_problems_are_reported_together(monkeypatch, base_env, tmp_path, capsys):
+    """Three bad variables should take one run to diagnose, not three."""
+    env = base_env | {
+        "OUTPUT_MODE": "vibes",
+        "N_FORECAST_STEPS": "0",
+        "SRC_STORAGE_OPTIONS": "not json",
+    }
+    assert invoke(monkeypatch, env) == 2
+
+    stderr = capsys.readouterr().err
+    assert "The environment configuration has 3 problems:" in stderr
+    assert "OUTPUT_MODE must be one of" in stderr
+    assert "N_FORECAST_STEPS must be -1" in stderr
+    assert "SRC_STORAGE_OPTIONS must be valid JSON" in stderr
+    assert not (tmp_path / "out.zarr").exists()
 
 
 def test_missing_input_variable_exits_3(monkeypatch, base_env):
@@ -361,8 +405,8 @@ def test_declared_standard_name_and_units_are_asserted(monkeypatch, base_env, ca
     assert invoke(monkeypatch, env) == 3
 
     stderr = capsys.readouterr().err
-    assert "'u10' has standard_name='eastward_wind'" in stderr
-    assert "'v10' has units='m s-1'" in stderr
+    assert "'u10' has standard_name 'eastward_wind'" in stderr
+    assert "'v10' has units 'm s-1'" in stderr
     assert "'t2m'" not in stderr
 
 
