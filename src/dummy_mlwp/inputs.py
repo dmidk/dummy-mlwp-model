@@ -342,6 +342,8 @@ def stack_channels(
     StorageError
         If reading the data fails: this is where the store's chunks are actually
         fetched, so the first place a read permission or a flaky endpoint can bite.
+        The grid-mapping variables are loaded here too, so a failure to read them is
+        reported against the input rather than during the output write.
     """
     layout = channel_layout(specs, config.level_coords)
     n_time = ds.sizes[coords.time]
@@ -355,6 +357,8 @@ def stack_channels(
                 da = da.isel({spec.level_coord: level_index})
             da = da.transpose(coords.time, coords.y, coords.x)
             out[:, channel] = da.values.astype("float32")
+        for name in find_grid_mapping_vars(ds, specs):
+            ds[name].variable.load()
     except storage_exceptions() as exc:
         raise storage_error(
             "SRC", config.input_zarr, config.src_storage_options, "read", exc

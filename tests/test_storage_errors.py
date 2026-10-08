@@ -306,6 +306,14 @@ def test_a_programming_error_in_an_exception_group_is_not_mistaken_for_storage(f
         stack_channels(ds, config.input_variables, config, detect_coords(ds))
 
 
+def test_failing_to_read_the_grid_mapping_is_reported_against_the_input(flaky, flaky_input):
+    ds = open_input(flaky_input)
+    config = Config.from_env(MINIMAL)
+    flaky(PermissionError("Access Denied"), match="crs/c")
+    with pytest.raises(StorageError, match="Could not read the input store"):
+        stack_channels(ds, config.input_variables, config, detect_coords(ds))
+
+
 # --- output side ---------------------------------------------------------------------
 
 
