@@ -6,16 +6,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from dummy_mlwp.__main__ import main
+from helpers import invoke
 
 LEVELS = "isobaricInhPa:850/500/250"
-
-
-def invoke(monkeypatch, env: dict[str, str]) -> int:
-    monkeypatch.delenv("LOG_LEVEL", raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    return main()
 
 
 def open_output(env: dict[str, str]) -> xr.Dataset:
@@ -94,6 +87,13 @@ def test_projected_run_keeps_the_crs(monkeypatch, base_env):
     out = open_output(base_env)
     assert "crs" in out.variables
     assert out.t2m.attrs["grid_mapping"] == "crs"
+
+
+def test_output_attributes_record_the_version_and_the_input(monkeypatch, base_env):
+    assert invoke(monkeypatch, base_env) == 0
+    out = open_output(base_env)
+    assert out.attrs["source"].startswith("dummy-mlwp-model ")
+    assert out.attrs["input_zarr"] == base_env["INPUT_ZARR"]
 
 
 def test_transposed_input_dimensions_are_accepted(monkeypatch, tmp_path, make_input):

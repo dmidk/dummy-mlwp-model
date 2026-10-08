@@ -1,6 +1,9 @@
 # NOTE: .git is deliberately NOT ignored — hatch-vcs derives the version from the git
 # tag during the build stage. A multi-stage build keeps it out of the runtime image.
-.github
+#
+# Only ignore paths git ignores too. Leaving out a tracked path (as .github once was)
+# makes the build-stage checkout look modified, and hatch-vcs then stamps the version
+# with a date: a v0.1.0 build comes out as 0.1.0.post1.dev0+d20261001.
 .venv
 __pycache__
 *.egg-info
