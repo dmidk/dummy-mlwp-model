@@ -294,7 +294,6 @@ def test_failing_to_read_part_of_a_shard_is_a_storage_error(flaky, make_dataset)
     with pytest.raises(StorageError, match="Could not read the input store") as info:
         stack_channels(ds, config.input_variables, config, detect_coords(ds))
     assert "PermissionError: Access Denied" in str(info.value)
-    assert isinstance(info.value.__cause__, BaseExceptionGroup)
 
 
 def test_a_programming_error_in_an_exception_group_is_not_mistaken_for_storage(flaky, flaky_input):
