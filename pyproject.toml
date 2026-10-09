@@ -25,6 +25,11 @@ remote = ["s3fs>=2024.6", "gcsfs>=2024.6"]
 # we build are option names s3fs actually accepts. moto serves real S3 traffic on
 # localhost, so the end-to-end S3 tests need neither network access nor credentials.
 dev = ["pytest>=8.0", "ruff>=0.6", "s3fs>=2024.6", "moto[server]>=5.0"]
+# Which torch build to install: exactly one of these, each from its own PyTorch index
+# (see [tool.uv.sources]). Both pin the same version, so CI (cpu) tests the torch the
+# image (cu124) ships. Bump them together.
+cpu = ["torch==2.5.1"]
+cu124 = ["torch==2.5.1"]
 
 [project.scripts]
 dummy-mlwp = "dummy_mlwp.__main__:main"
@@ -43,6 +48,29 @@ version-file = "src/dummy_mlwp/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dummy_mlwp"]
+
+# uv.lock holds the resolved versions that CI and the container both install. One uv
+# version everywhere (setup-uv reads it from here; the Dockerfile copies the same one),
+# since another version may rewrite the lock and fail CI's up-to-date check.
+[tool.uv]
+required-version = "==0.12.22"
+conflicts = [[{ extra = "cpu" }, { extra = "cu124" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu124", extra = "cu124" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.ruff]
 line-length = 100
