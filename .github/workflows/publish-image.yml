@@ -1,15 +1,38 @@
 name: Publish image
 
+# Every run builds the image and smoke-tests it; only a version tag pushes it to ghcr.io:
+#
+#   v0.1.0     -> 0.1.0, 0.1, latest
+#   v0.2.0rc1  -> 0.2.0rc1 only (pre-, post- and dev releases never move latest)
+#
+# PRs and main build only when something that goes into the image changed. GitHub does
+# not evaluate path filters for tag pushes, so a release tag always builds.
 on:
   push:
-    branches: [main, master]
-    tags: ["v*"]
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - src/**
+      - .github/workflows/publish-image.yml
   pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - src/**
+      - .github/workflows/publish-image.yml
+  # On a tag ref this re-publishes that release; on a branch it only builds and tests.
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # The image that is smoke-tested, before anything is pushed.
+  LOCAL_IMAGE: dummy-mlwp:smoke
+  PUBLISH: ${{ github.ref_type == 'tag' }}
 
 concurrency:
   group: image-${{ github.ref }}
@@ -23,82 +46,97 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          # The image version comes from the git tag via hatch-vcs, and the build
-          # fails outright if no tag is reachable — so the full history is required.
+          # The image version comes from the git tag via hatch-vcs, which needs the
+          # history and tags. Without them it does not fail but produces a bogus version,
+          # which is why the smoke test checks the version against the tag.
           fetch-depth: 0
 
-      - name: Free up disk space
-        # The CUDA runtime base plus the torch wheels come to ~6 GB, which is close
-        # to what a hosted runner has free. Drop toolchains this build never uses.
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-                      /usr/local/share/boost /usr/local/.ghcup
-          df -h /
-
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to the container registry
-        # Not on pull requests: forks have no write access, and a PR build is only
-        # there to prove the Dockerfile still builds.
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        uses: docker/setup-buildx-action@v4
 
       - name: Derive tags and labels
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # pep440 rather than semver: hatch-vcs versions are PEP 440, and a tag such as
+          # v0.2.0rc1 is not valid semver, so it would yield no image tag at all. The
+          # default latest=auto adds latest for final releases only.
+          #
+          # The ref rules only label branch and PR builds (and stop metadata-action
+          # warning that it generated nothing). They never match on a tag, and only
+          # tags are pushed, so they never reach the registry.
           tags: |
+            type=pep440,pattern={{version}}
+            type=pep440,pattern={{major}}.{{minor}}
             type=ref,event=branch
             type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Check the tag yields image tags
+        if: env.PUBLISH == 'true' && steps.meta.outputs.tags == ''
+        run: |
+          echo "::error::${GITHUB_REF_NAME} is not a PEP 440 version, so there is nothing to tag the image with"
+          exit 1
+
+      - name: Build
+        # Loaded into the local daemon rather than pushed, so the smoke test runs against
+        # exactly this image before any of it reaches the registry.
+        uses: docker/build-push-action@v7
         with:
           context: .
           # linux/amd64 only: the CUDA base image has no arm64 variant.
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: false
 
-      - name: Smoke test the built image
-        # Proves the entrypoint runs, the CPU path produces a store, and the documented
-        # failure exit codes hold in the container. GPU behaviour needs a GPU runner, so
-        # it is verified manually — see the README.
-        if: github.event_name != 'pull_request'
+      - name: Smoke test the image
+        # Proves the version is right, the entrypoint runs, the CPU path produces a store,
+        # and the documented failure exit codes hold in the container. GPU behaviour needs
+        # a GPU runner, so it is verified manually — see the README.
+        env:
+          # Only set on a tag: the image's version must then be exactly that release.
+          EXPECTED_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
           set -u
-          TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
           mkdir -p /tmp/data && chmod 777 /tmp/data
           DOCKER="docker run --rm -v /tmp/data:/data"
 
-          $DOCKER --entrypoint python "$TAG" \
-            -c "import dummy_mlwp; print('version', dummy_mlwp.__version__)"
+          # xarray depends on packaging, so it is in the image to compare versions with.
+          $DOCKER -e EXPECTED_VERSION --entrypoint python "$LOCAL_IMAGE" -c '
+          import os, re
+          from packaging.version import Version
+          import dummy_mlwp
 
-          # Build a tiny input store with the image's own xarray.
-          $DOCKER --entrypoint python "$TAG" -c "
+          version = dummy_mlwp.__version__
+          print("image version", version)
+          assert not re.search(r"[+.]d\d{8}$", version), (
+              f"{version}: the build saw a modified checkout (check .dockerignore)"
+          )
+          expected = os.environ.get("EXPECTED_VERSION", "")
+          if expected:
+              assert Version(version) == Version(expected), (
+                  f"image version {version} does not match the tag {expected}"
+              )
+          '
+
+          # Build a tiny input store with the image's own xarray. The coordinates carry
+          # CF attributes, as a real input's would: matching coordinates by name alone is
+          # a fallback, not something the smoke test should depend on.
+          $DOCKER --entrypoint python "$LOCAL_IMAGE" -c "
           import numpy as np, pandas as pd, xarray as xr
           xr.Dataset(
-              {'t2m': (('time', 'y', 'x'), np.zeros((3, 8, 8), 'float32'))},
+              {'t2m': (('time', 'y', 'x'), np.zeros((3, 8, 8), 'float32'), {'units': 'K'})},
               coords={
-                  'time': pd.date_range('2024-01-01', periods=3, freq='6h'),
-                  'y': np.arange(8.0), 'x': np.arange(8.0),
+                  'time': ('time', pd.date_range('2024-01-01', periods=3, freq='6h'),
+                           {'standard_name': 'time', 'axis': 'T'}),
+                  'y': ('y', np.arange(8.0) * 2500.0,
+                        {'standard_name': 'projection_y_coordinate', 'axis': 'Y', 'units': 'm'}),
+                  'x': ('x', np.arange(8.0) * 2500.0,
+                        {'standard_name': 'projection_x_coordinate', 'axis': 'X', 'units': 'm'}),
               },
           ).to_zarr('/data/in.zarr', mode='w', consolidated=True, zarr_format=3)
           "
@@ -115,24 +153,46 @@ jobs:
           expect_exit 0 $DOCKER \
             -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
             -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K,tp:mm \
-            -e N_FORECAST_STEPS=4 -e DEVICE=cpu "$TAG"
+            -e N_FORECAST_STEPS=4 -e DEVICE=cpu "$LOCAL_IMAGE"
           test -d /tmp/data/out.zarr && echo "CPU run produced a store"
 
           expect_exit 3 $DOCKER \
             -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
             -e INPUT_VARIABLES=t2m,notAVariable -e OUTPUT_VARIABLES=t2m:K \
-            -e DEVICE=cpu "$TAG"
+            -e DEVICE=cpu "$LOCAL_IMAGE"
           echo "Missing input variable correctly exited 3"
 
           expect_exit 2 $DOCKER \
             -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
             -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K \
-            -e OUTPUT_MODE=vibes -e DEVICE=cpu "$TAG"
+            -e OUTPUT_MODE=vibes -e DEVICE=cpu "$LOCAL_IMAGE"
           echo "Bad OUTPUT_MODE correctly exited 2"
 
           # A valid store, so this reaches device selection rather than failing earlier.
           expect_exit 4 $DOCKER \
             -e INPUT_ZARR=/data/in.zarr -e OUTPUT_ZARR=/data/out.zarr \
             -e INPUT_VARIABLES=t2m -e OUTPUT_VARIABLES=t2m:K \
-            -e DEVICE=cuda "$TAG"
+            -e DEVICE=cuda "$LOCAL_IMAGE"
           echo "DEVICE=cuda without a GPU correctly exited 4"
+
+      - name: Log in to the container registry
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        # Same inputs as the Build step, in the same job, so every layer comes from the
+        # builder's local cache: this pushes the image that was just tested rather than
+        # building a new one.
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
