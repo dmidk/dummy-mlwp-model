@@ -1,34 +1,20 @@
 name: Dependabot changelog
 
 # Records each Dependabot bump under "Unreleased" in CHANGELOG.md by committing the
-# entry straight onto the Dependabot PR branch.
+# entry straight onto the Dependabot PR branch. Copied from observingClouds/ecmwfspec.
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-
-concurrency:
-  group: dependabot-changelog-${{ github.ref }}
-  cancel-in-progress: true
+    types: [opened, reopened, synchronize]
+    branches: [main]
 
 jobs:
-  changelog:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+  update-changelog:
+    if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-
-      - uses: dangoslen/dependabot-changelog-helper@v4
-        with:
-          version: Unreleased
-          changelogPath: ./CHANGELOG.md
-
-      - uses: stefanzweifel/git-auto-commit-action@v7
-        with:
-          commit_message: Update CHANGELOG.md for Dependabot bump
-          file_pattern: CHANGELOG.md
+      - uses: crambl/dependabot-changelog-writer@trunk
