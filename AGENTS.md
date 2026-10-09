@@ -90,10 +90,20 @@ all its problems in one run:
 ## Testing
 
 ```sh
-uv pip install -e ".[dev]"
-pytest                        # ~110 tests, CPU only, a few seconds
+uv sync --extra cpu --extra remote --extra dev   # the locked versions CI and the image use
+pytest                        # CPU only, a few seconds
 ruff check . && ruff format --check .
 ```
+
+`uv run` syncs first, without extras unless it is given them; pass the same `--extra`
+flags, or on Linux it swaps the CPU torch for PyPI's CUDA build.
+
+`uv.lock` resolves for every platform, but only linux/x86_64, where CI and the container
+run, is tested. Where torch has no wheel for the platform and Python, `uv pip install -e
+".[dev]"` installs unpinned versions; fine for development, but CI on the locked versions
+is the reference. Do not narrow the lock with `[tool.uv] environments`: uv then demands a
+linux/x86_64 torch wheel for every Python the lock covers, 3.14 included, which the pinned
+torch lacks, so every incremental `uv lock` fails.
 
 The suite never needs a GPU or a container; end-to-end tests drive `main()` with a
 patched environment and check the resulting store and exit code. When adding a feature,
@@ -148,6 +158,15 @@ Do not revisit these without being asked:
   `X.Y` and `latest`; a PEP 440 pre-, post- or dev release tag publishes only its own
   version and never moves `latest`. Pushes to `main` and PRs build and smoke-test the
   image without pushing it. The image is smoke-tested *before* it is pushed.
+- **Dependency versions come from `uv.lock`**, which CI and the image both install from;
+  never add a dependency list to the Dockerfile again. torch is chosen by exactly one of
+  the `cpu` (CI) and `cu124` (image) extras, both pinned to the same version, which
+  `constraint-dependencies` also pins for a sync with neither extra — bump all three
+  together. CI's `container` job reads the Python version from the Dockerfile's
+  `ARG PYTHON_VERSION`, so the container's exact configuration is always one of the
+  tested ones; other matrix entries may test further versions. After changing
+  dependencies run `uv lock` with the uv version `required-version` names; CI fails on a
+  stale lock.
 
 ## Pull requests
 

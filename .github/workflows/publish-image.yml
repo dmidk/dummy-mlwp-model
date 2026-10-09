@@ -15,6 +15,7 @@ on:
       - Dockerfile
       - .dockerignore
       - pyproject.toml
+      - uv.lock
       - src/**
       - .github/workflows/publish-image.yml
   pull_request:
@@ -22,6 +23,7 @@ on:
       - Dockerfile
       - .dockerignore
       - pyproject.toml
+      - uv.lock
       - src/**
       - .github/workflows/publish-image.yml
   # On a tag ref this re-publishes that release; on a branch it only builds and tests.
