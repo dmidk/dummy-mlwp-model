@@ -467,7 +467,14 @@ pytest
 ruff check . && ruff format --check .
 ```
 
-The test suite is CPU-only and needs no container.
+The test suite is CPU-only and needs no container. CI makes one more run on a GPU: the
+`gpu` job, on an AWS GPU instance (one NVIDIA T4) that [cirun.io](https://cirun.io/)
+starts for it and removes afterwards, configured in `.cirun.yml`. It runs the same
+end-to-end run as the CPU smoke test, with `DEVICE=cuda` and the image's CUDA build of
+torch, and checks the log for the device name and a non-zero peak GPU memory. Everything
+else stays on GitHub's runners. It runs only once the CPU job has passed, and not for
+pull requests from forks. It tests the code on a GPU, not the image, which is still
+checked by hand (see [In a container](#in-a-container)).
 
 Dependency versions are pinned in `uv.lock`, and CI and the container image both install
 from it. torch comes as a CPU build (`cpu` extra, for CI and development) or a CUDA 12.4
