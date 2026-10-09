@@ -24,9 +24,16 @@ RUN git describe --tags --dirty --always \
     && ls -la /dist
 
 # ---------------------------------------------------------------------------------
-# Runtime stage: CUDA runtime + torch, then the wheel.
+# Runtime stage: CUDA base + torch, then the wheel.
+#
+# The -base image, not -runtime: the torch wheel brings its own CUDA libraries as
+# nvidia-*-cu12 pip packages, so -runtime's system copies of cuBLAS, cuFFT, NCCL and
+# the rest (a 1.4 GB layer) would only duplicate them. -base still carries what GPU
+# access needs: the NVIDIA_* variables the container toolkit reads to mount the host
+# driver, and the NVIDIA_REQUIRE_CUDA driver check. Anything added later that links
+# against system CUDA libraries instead of shipping its own would need -runtime back.
 # ---------------------------------------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS runtime
 
 ARG PYTHON_VERSION=3.11
 ARG TORCH_VERSION=2.5.1
@@ -73,10 +80,16 @@ RUN useradd --create-home --uid 1000 model
 USER model
 WORKDIR /home/model
 
+# The image exists to exercise a GPU, so it requires one: started without GPU access it
+# exits 4 instead of quietly running on CPU. Pass DEVICE=cpu (or auto) to run without a
+# GPU, as the CI smoke test does — its runners have none. Set here, after the installs,
+# so that changing it never invalidates the torch layer. The Python default stays auto.
+ENV DEVICE=cuda
+
 # Configuration is entirely environmental, so there are no CMD arguments to pass.
 ENTRYPOINT ["python", "-m", "dummy_mlwp"]
 
 LABEL org.opencontainers.image.title="dummy-mlwp-model" \
       org.opencontainers.image.description="Dummy deep-learning weather model: zarr in, zarr out" \
-      org.opencontainers.image.source="https://github.com/OWNER/dummy-mlwp-model" \
+      org.opencontainers.image.source="https://github.com/dmidk/dummy-mlwp-model" \
       org.opencontainers.image.licenses="MIT"

@@ -2,14 +2,20 @@
 
 Grammar, per comma-separated entry::
 
-    name[:units][@levelCoordName]
+    name[=standard_name][:units][@levelCoordName]
 
 Examples::
 
-    t2m                      2D field, no units attribute
-    t2m:K                    2D field, units="K"
-    t:K@isobaricInhPa        4D field (time, isobaricInhPa, y, x)
+    t2m                              2D field, no CF attributes asserted or written
+    t2m:K                            2D field, units="K"
+    t2m=air_temperature:K            ...and standard_name="air_temperature"
+    t=air_temperature:K@isobaricInhPa
+                                     4D field (time, isobaricInhPa, y, x)
     u:m s-1@heightAboveGround
+
+``standard_name`` and ``units`` are both optional, because not every field has a CF
+standard name (a model-specific diagnostic, say). Whatever *is* declared is asserted
+against the input and written to the output.
 
 Level coordinates are declared once, in LEVEL_COORDS::
 
@@ -31,6 +37,59 @@ from .errors import ConfigError
 #: anything that would be awkward as a zarr array name is rejected up front.
 _NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
+#: CF standard names are lower case letters, digits and underscores, starting with a
+#: letter. The name itself is not looked up in the standard-name table, which would
+#: need a network fetch or a vendored copy; the format check catches typos of shape.
+_STANDARD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+#: CF descriptions of the level coordinates this model can write without an input
+#: counterpart to copy attributes from. Names and attributes follow cfgrib, which is
+#: where the camelCase level names come from in the first place.
+KNOWN_LEVEL_COORDS: dict[str, dict[str, str]] = {
+    "isobaricInhPa": {
+        "standard_name": "air_pressure",
+        "long_name": "pressure",
+        "units": "hPa",
+        "positive": "down",
+        "axis": "Z",
+    },
+    "isobaricInPa": {
+        "standard_name": "air_pressure",
+        "long_name": "pressure",
+        "units": "Pa",
+        "positive": "down",
+        "axis": "Z",
+    },
+    "heightAboveGround": {
+        "standard_name": "height",
+        "long_name": "height above the surface",
+        "units": "m",
+        "positive": "up",
+        "axis": "Z",
+    },
+    "heightAboveSea": {
+        "standard_name": "height_above_mean_sea_level",
+        "long_name": "height above mean sea level",
+        "units": "m",
+        "positive": "up",
+        "axis": "Z",
+    },
+    "depthBelowLand": {
+        "standard_name": "depth",
+        "long_name": "soil depth",
+        "units": "m",
+        "positive": "down",
+        "axis": "Z",
+    },
+    "hybrid": {
+        "standard_name": "model_level_number",
+        "long_name": "hybrid level",
+        "units": "1",
+        "positive": "down",
+        "axis": "Z",
+    },
+}
+
 
 @dataclass(frozen=True)
 class VarSpec:
@@ -41,16 +100,24 @@ class VarSpec:
     name : str
         Variable name as it appears in the zarr store.
     units : str or None, optional
-        Units string, written to the output variable's attributes. ``None`` means no
-        units attribute is written, and no units are asserted on input.
+        Units string. On input it is an assertion: the store variable's ``units``
+        attribute must equal it exactly, as a plain string with no unit parsing, so
+        ``m s-1`` does not match ``m/s``. On output it is written to the variable's
+        attributes. ``None`` means no units are asserted on input and no units
+        attribute is written on output.
     level_coord : str or None, optional
         Name of the level coordinate this variable is defined on, or ``None`` for a
         purely 2D field.
+    standard_name : str or None, optional
+        CF standard name. On input the variable's ``standard_name`` attribute must
+        match it; on output it is written. ``None`` asserts and writes nothing, for
+        fields that have no CF standard name.
     """
 
     name: str
     units: str | None = None
     level_coord: str | None = None
+    standard_name: str | None = None
 
     def n_levels(self, level_coords: dict[str, np.ndarray]) -> int:
         """Count the 2D fields ("channels") this variable occupies.
@@ -95,6 +162,8 @@ class VarSpec:
             A string that parses back to an equal :class:`VarSpec`.
         """
         text = self.name
+        if self.standard_name is not None:
+            text += f"={self.standard_name}"
         if self.units is not None:
             text += f":{self.units}"
         if self.level_coord is not None:
@@ -222,7 +291,7 @@ def _parse_level_values(tokens: list[str], name: str, source: str) -> np.ndarray
 
 def parse_var_specs(
     text: str,
-    level_coords: dict[str, np.ndarray],
+    level_coords: dict[str, np.ndarray] | None,
     source: str,
 ) -> list[VarSpec]:
     """Parse a comma-separated list of variable specs.
@@ -230,9 +299,14 @@ def parse_var_specs(
     Parameters
     ----------
     text : str
-        Entries in the form ``name[:units][@levelCoordName]``, comma-separated.
-    level_coords : dict of str to numpy.ndarray
-        Declared level coordinates, used to validate ``@`` references.
+        Entries in the form ``name[=standard_name][:units][@levelCoordName]``,
+        comma-separated.
+    level_coords : dict of str to numpy.ndarray or None
+        Declared level coordinates, used to validate ``@`` references. ``None`` means
+        the declared set is unknown because LEVEL_COORDS itself failed to parse: the
+        rest of the grammar is still checked, but whether a ``@`` reference is declared
+        is not, since every reference would otherwise be flagged. Pass ``None`` only
+        once that failure has been recorded, so the specs returned never reach a run.
     source : str
         Environment variable name used in error messages.
 
@@ -245,7 +319,8 @@ def parse_var_specs(
     ------
     ConfigError
         If the list is empty, a name repeats, an entry is malformed, or a ``@``
-        reference names an undeclared level coordinate.
+        reference names an undeclared level coordinate (checked only when
+        ``level_coords`` is not ``None``).
     """
     specs: list[VarSpec] = []
     seen: set[str] = set()
@@ -260,15 +335,16 @@ def parse_var_specs(
     return specs
 
 
-def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> VarSpec:
-    """Parse a single ``name[:units][@levelCoord]`` entry.
+def _parse_one(entry: str, level_coords: dict[str, np.ndarray] | None, source: str) -> VarSpec:
+    """Parse a single ``name[=standard_name][:units][@levelCoord]`` entry.
 
     Parameters
     ----------
     entry : str
         One comma-separated entry, already stripped.
-    level_coords : dict of str to numpy.ndarray
-        Declared level coordinates, used to validate a ``@`` reference.
+    level_coords : dict of str to numpy.ndarray or None
+        Declared level coordinates, used to validate a ``@`` reference. ``None`` skips
+        that check; see :func:`parse_var_specs`.
     source : str
         Environment variable name used in error messages.
 
@@ -280,14 +356,14 @@ def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> 
     Raises
     ------
     ConfigError
-        If the name is invalid, the units part is empty, the entry ends in a bare
-        ``'@'``, or the level coordinate is undeclared.
+        If the name or standard name is invalid, the units or standard-name part is
+        empty, the entry ends in a bare ``'@'``, or the level coordinate is undeclared.
     """
     head, _, raw_level = entry.partition("@")
     level_coord: str | None = None
     if raw_level:
         level_coord = _check_name(raw_level, "level coordinate reference", source)
-        if level_coord not in level_coords:
+        if level_coords is not None and level_coord not in level_coords:
             known = ", ".join(sorted(level_coords)) or "(none declared)"
             raise ConfigError(
                 f"{source}: entry {entry!r} references level coordinate "
@@ -296,12 +372,23 @@ def _parse_one(entry: str, level_coords: dict[str, np.ndarray], source: str) -> 
     elif entry.endswith("@"):
         raise ConfigError(f"{source}: entry {entry!r} has a trailing '@' with no coordinate name")
 
-    raw_name, sep, raw_units = head.partition(":")
-    name = _check_name(raw_name, "variable name", source)
+    head, sep, raw_units = head.partition(":")
     units = raw_units.strip() if sep else None
     if sep and not units:
         raise ConfigError(f"{source}: entry {entry!r} has a ':' but no units")
-    return VarSpec(name=name, units=units, level_coord=level_coord)
+
+    raw_name, eq, raw_standard_name = head.partition("=")
+    name = _check_name(raw_name, "variable name", source)
+    standard_name = raw_standard_name.strip() if eq else None
+    if eq and not standard_name:
+        raise ConfigError(f"{source}: entry {entry!r} has a '=' but no standard name")
+    if standard_name is not None and not _STANDARD_NAME_RE.match(standard_name):
+        raise ConfigError(
+            f"{source}: entry {entry!r} has standard name {standard_name!r}, which is not "
+            "a valid CF standard name (lower case letters, digits and '_', starting with "
+            "a letter, e.g. 'air_temperature')"
+        )
+    return VarSpec(name=name, units=units, level_coord=level_coord, standard_name=standard_name)
 
 
 def _split_entries(text: str) -> list[str]:
