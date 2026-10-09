@@ -1,8 +1,5 @@
 name: Dependabot changelog
 
-# Records each Dependabot bump under "Unreleased" in CHANGELOG.md by committing the
-# entry straight onto the Dependabot PR branch. Copied from observingClouds/ecmwfspec.
-
 on:
   pull_request:
     types: [opened, reopened, synchronize]
