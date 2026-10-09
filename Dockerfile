@@ -26,11 +26,13 @@ RUN git describe --tags --dirty --always \
 # torch and its CUDA libraries, cut out of uv.lock with their hashes, for the runtime
 # stage's torch layer. They all install from the PyTorch index (its URL read from
 # pyproject.toml, so it is defined once), which serves byte-identical copies of the
-# nvidia-* and triton wheels, so the lock's hashes verify them from there too.
+# nvidia-* and triton wheels, so the lock's hashes verify them from there too. The
+# export's "# via" comments are dropped: they reflect the whole lock, so they can change
+# when these pins have not, and would rebuild the torch layer for nothing.
 RUN uv export --frozen --no-emit-project --extra cu124 --output-file /tmp/all.txt \
     && index=$(python -c "import tomllib; print(next(i['url'] for i in tomllib.load(open('pyproject.toml', 'rb'))['tool']['uv']['index'] if i['name'] == 'pytorch-cu124'))") \
     && { echo "--index-url $index"; \
-         awk '/^[^ #-]/ { keep = /^(torch|triton|nvidia-[a-z0-9-]+)==/ } keep' /tmp/all.txt; } \
+         awk '/^[^ #-]/ { keep = /^(torch|triton|nvidia-[a-z0-9-]+)==/ } keep && !/^ *#/' /tmp/all.txt; } \
        > /torch.txt \
     && grep -E '^(--index-url|[a-z])' /torch.txt
 
