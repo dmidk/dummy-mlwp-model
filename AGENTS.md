@@ -95,9 +95,12 @@ pytest                        # CPU only, a few seconds
 ruff check . && ruff format --check .
 ```
 
-`uv.lock` covers linux/x86_64 only, where CI and the container run. Elsewhere,
-`uv pip install -e ".[dev]"` installs unpinned versions; fine for development, but CI on
-the locked versions is the reference.
+`uv.lock` resolves for every platform, but only linux/x86_64, where CI and the container
+run, is tested. Where torch has no wheel for the platform and Python, `uv pip install -e
+".[dev]"` installs unpinned versions; fine for development, but CI on the locked versions
+is the reference. Do not narrow the lock with `[tool.uv] environments`: uv then demands a
+linux/x86_64 torch wheel for every Python the lock covers, 3.14 included, which the pinned
+torch lacks, so every incremental `uv lock` fails.
 
 The suite never needs a GPU or a container; end-to-end tests drive `main()` with a
 patched environment and check the resulting store and exit code. When adding a feature,
