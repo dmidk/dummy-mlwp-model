@@ -476,5 +476,7 @@ the container's own Python version with the locked dependencies, so CI tests exa
 what the image ships. After changing a dependency, run `uv lock`; CI fails if the lock
 is out of date.
 
-The lock covers linux/x86_64, where CI and the container run. On other platforms,
-`uv pip install -e ".[dev]"` installs unpinned versions instead.
+The lock resolves for every platform, but only linux/x86_64, where CI and the container
+run, is tested. Elsewhere `uv sync` needs a torch wheel for your platform and Python
+(there is none for Intel Macs, for example); without one, `uv pip install -e ".[dev]"`
+installs unpinned versions instead.

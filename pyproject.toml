@@ -54,8 +54,6 @@ packages = ["src/dummy_mlwp"]
 # since another version may rewrite the lock and fail CI's up-to-date check.
 [tool.uv]
 required-version = "==0.12.22"
-# Resolve only for where the lock is used: the container and CI, both linux/amd64.
-environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 conflicts = [[{ extra = "cpu" }, { extra = "cu124" }]]
 
 [tool.uv.sources]
