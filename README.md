@@ -467,11 +467,15 @@ pytest
 ruff check . && ruff format --check .
 ```
 
-The test suite is CPU-only and needs no container.
+The test suite is CPU-only and needs no container. To use `uv run` instead, give it the
+same extras (`uv run --extra cpu --extra remote --extra dev pytest`): without them it
+syncs the environment to the lock without the extras, which on Linux replaces the CPU
+torch with PyPI's build of the same version and its CUDA libraries.
 
 Dependency versions are pinned in `uv.lock`, and CI and the container image both install
 from it. torch comes as a CPU build (`cpu` extra, for CI and development) or a CUDA 12.4
-build (`cu124` extra, for the image), both at the same version. One CI job always runs
+build (`cu124` extra, for the image), both at the same version; a constraint in
+`pyproject.toml` holds torch to it even with neither extra. One CI job always runs
 the container's own Python version with the locked dependencies, so CI tests exactly
 what the image ships. After changing a dependency, run `uv lock`; CI fails if the lock
 is out of date.

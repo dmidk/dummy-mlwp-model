@@ -95,6 +95,9 @@ pytest                        # CPU only, a few seconds
 ruff check . && ruff format --check .
 ```
 
+`uv run` syncs first, without extras unless it is given them; pass the same `--extra`
+flags, or on Linux it swaps the CPU torch for PyPI's CUDA build.
+
 `uv.lock` resolves for every platform, but only linux/x86_64, where CI and the container
 run, is tested. Where torch has no wheel for the platform and Python, `uv pip install -e
 ".[dev]"` installs unpinned versions; fine for development, but CI on the locked versions
@@ -157,7 +160,8 @@ Do not revisit these without being asked:
   image without pushing it. The image is smoke-tested *before* it is pushed.
 - **Dependency versions come from `uv.lock`**, which CI and the image both install from;
   never add a dependency list to the Dockerfile again. torch is chosen by exactly one of
-  the `cpu` (CI) and `cu124` (image) extras, both pinned to the same version — bump them
+  the `cpu` (CI) and `cu124` (image) extras, both pinned to the same version, which
+  `constraint-dependencies` also pins for a sync with neither extra — bump all three
   together. CI's `container` job reads the Python version from the Dockerfile's
   `ARG PYTHON_VERSION`, so the container's exact configuration is always one of the
   tested ones; other matrix entries may test further versions. After changing

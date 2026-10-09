@@ -27,7 +27,7 @@ remote = ["s3fs>=2024.6", "gcsfs>=2024.6"]
 dev = ["pytest>=8.0", "ruff>=0.6", "s3fs>=2024.6", "moto[server]>=5.0"]
 # Which torch build to install: exactly one of these, each from its own PyTorch index
 # (see [tool.uv.sources]). Both pin the same version, so CI (cpu) tests the torch the
-# image (cu124) ships. Bump them together.
+# image (cu124) ships. Bump them together, with the constraint in [tool.uv].
 cpu = ["torch==2.5.1"]
 cu124 = ["torch==2.5.1"]
 
@@ -54,6 +54,10 @@ packages = ["src/dummy_mlwp"]
 # since another version may rewrite the lock and fail CI's up-to-date check.
 [tool.uv]
 required-version = "==0.12.22"
+# The conflict stops anyone picking both torch extras; the constraint covers picking
+# neither (a plain `uv sync` or `uv run`), which would otherwise resolve torch>=2.4 to
+# the newest release on PyPI. Keep it at the extras' version.
+constraint-dependencies = ["torch==2.5.1"]
 conflicts = [[{ extra = "cpu" }, { extra = "cu124" }]]
 
 [tool.uv.sources]
